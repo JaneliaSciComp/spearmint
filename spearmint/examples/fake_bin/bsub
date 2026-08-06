@@ -1,0 +1,25 @@
+#!/bin/bash
+# Fake bsub for local testing of spearmint.lsf (put spearmint/examples/fake_bin on PATH).
+# Handles exactly the flag subset lsf.py emits: lone -K, and -J/-P/-q/-W/-n/-R/-gpu/-oo taking
+# a value. With -K, runs the remaining argv as the job -- output redirected to the -oo file,
+# exit code passed through, LSB_JOBID set like LSF would. Without -K (driver submission),
+# prints an LSF-style ack and runs the job in the background.
+log=""; blocking=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -K) blocking=1; shift ;;
+    -oo) log="$2"; shift 2 ;;
+    -J|-P|-q|-W|-n|-R|-gpu) shift 2 ;;
+    *) break ;;
+  esac
+done
+if [[ -n "$blocking" ]]; then
+  echo "Job <9$$> is submitted to queue <fake>."
+  echo "<<Waiting for dispatch ...>>"
+  echo "<<Starting on fakehost>>"
+  if [[ -n "$log" ]]; then exec env LSB_JOBID="9$$" "$@" > "$log" 2>&1; fi
+  exec env LSB_JOBID="9$$" "$@"
+else
+  echo "Job <12345> is submitted to queue <local>."
+  nohup env LSB_JOBID="9$$" "$@" > "${log:-/dev/null}" 2>&1 &
+fi

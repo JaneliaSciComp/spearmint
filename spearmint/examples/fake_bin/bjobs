@@ -1,0 +1,5 @@
+#!/bin/bash
+# Fake bjobs for local testing of rundb._lsf_alive (put spearmint/examples/fake_bin on PATH).
+# Prints the contents of $FAKE_BJOBS_FILE as the job state ("RUN", "DONE", ...); an empty or
+# missing file prints nothing, mimicking bjobs having forgotten the job id.
+cat "${FAKE_BJOBS_FILE:-/dev/null}" 2>/dev/null

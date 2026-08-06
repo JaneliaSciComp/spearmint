@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spearmint"
+version = "0.1.0"
+description = "Reproducible, queryable experiment runs (rundb) + a minimal LSF/DAG scheduler (dagrunner), with a terminal/browser status UI and one-command cluster launch."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "BSD 3-Clause License" }
+authors = [{ name = "Coleman Broaddus", email = "broaddusc@janelia.hhmi.org" }]
+# No runtime dependencies: the core is stdlib-only. The only externals are *processes* it shells
+# out to (git/jj/ssh/bsub/bjobs/uv/oc-rsync), which live on the machine, not in this environment.
+dependencies = []
+
+[project.scripts]
+spearmint = "spearmint.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["spearmint*"]

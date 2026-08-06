@@ -1,0 +1,33 @@
+# spearmint per-project config. Copy to `spearmint.toml` at your repo root (or paste these keys
+# under a [tool.spearmint] table in your pyproject.toml) and edit. Every key is optional; unset
+# keys fall back to the built-in default shown. Any key can also be overridden by an env var
+# SPEARMINT_<KEY> (e.g. SPEARMINT_REMOTE_REPO=proj/lsd-spearmint), which wins over the file.
+
+# --- LSF cluster (Janelia; GPU queue preference h200 > h100 > a100 > l4) ---
+# lsf_project = "miaai"
+# gpu_queue   = "gpu_h100"
+# gpu_slots   = 12
+# cpu_queue   = "local"
+
+# --- remote (cluster) side; repo/root/venv are relative to $HOME on remote_host ---
+# remote_host      = "login1.int.janelia.org"
+# remote_repo      = "proj/mia-muvit-spearmint"   # this project's OWN cluster dir (rsync --delete
+#                                                 #   target); keep separate from any live run tree
+# remote_root      = "output_rundb"               # ledger + artifacts, relative to remote_repo
+# remote_venv      = ".venv/bin/python"
+# remote_rsync     = "oc-rsync"                    # rsync binary name on the remote's PATH
+# ssh_control_path = "~/.ssh/cm-spearmint-%r@%h:%p"
+
+# --- local side ---
+# rsync_bin = ""   # local oc-rsync path; empty -> PATH, else the mise install location
+# root      = ""   # where run outputs live; empty -> $SPEARMINT_ROOT env, else <repo>/output_rundb
+
+# --- launch / VCS (jj colocated with git) ---
+# bookmark = "lejepa-3d-dino"   # the origin bookmark launch pushes the base commit to
+
+# --- dashboard ---
+# port            = 8766
+# refresh_seconds = 10
+
+# --- dagrunner ---
+# max_parallel = 32
