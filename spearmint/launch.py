@@ -35,6 +35,10 @@ BOOKMARK = CONFIG.bookmark  # the origin bookmark the base commit is pushed to
 
 def _push_base() -> None:
     """Point BOOKMARK at the base commit (@-) and push it to origin -- durable provenance."""
+    assert BOOKMARK, (
+        "spearmint: bookmark is unset -- set it in spearmint.toml (or SPEARMINT_BOOKMARK) to the "
+        "origin bookmark launch should push the base commit to"
+    )
     subprocess.run(["jj", "bookmark", "set", BOOKMARK, "-r", "@-"], check=True)
     subprocess.run(["jj", "git", "push", "--bookmark", BOOKMARK], check=True)
 

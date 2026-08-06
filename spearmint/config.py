@@ -36,7 +36,9 @@ class SpearmintConfig:
     cpu_queue: str = "local"
     # remote (cluster) side -- repo/root/venv are relative to $HOME on remote_host
     remote_host: str = "login1.int.janelia.org"
-    remote_repo: str = "proj/mia-muvit-spearmint"
+    remote_repo: "str | None" = None  # per-project cluster dir -- REQUIRED (spearmint.toml/env) to
+    #                                   run any remote op; asserted at use so a project can't
+    #                                   silently push to another's dir (see remote._require_repo)
     remote_root: str = "output_rundb"
     remote_venv: str = ".venv/bin/python"
     remote_rsync: str = "oc-rsync"
@@ -45,7 +47,7 @@ class SpearmintConfig:
     rsync_bin: "str | None" = None  # None -> shutil.which('oc-rsync') or the mise install path
     root: "str | None" = None       # None -> $SPEARMINT_ROOT (env), else <repo root>/output_rundb
     # launch / VCS (jj)
-    bookmark: str = "lejepa-3d-dino"
+    bookmark: "str | None" = None  # origin bookmark launch pushes to -- REQUIRED (asserted in launch)
     # dashboard
     port: int = 8766
     refresh_seconds: int = 10

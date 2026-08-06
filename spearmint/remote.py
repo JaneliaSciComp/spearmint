@@ -64,6 +64,15 @@ _BACKUP_PY = (
 )
 
 
+def _require_repo() -> None:
+    """Every remote op targets REMOTE_REPO (this project's OWN cluster dir); it has no safe
+    default, so refuse loudly rather than let an unconfigured project touch another's dir."""
+    assert REMOTE_REPO, (
+        "spearmint: remote_repo is unset -- set it in spearmint.toml (or SPEARMINT_REMOTE_REPO) to "
+        "your project's cluster dir before any pull/push/launch"
+    )
+
+
 def _ssh_argv(remote_cmd: str) -> "list[str]":
     return ["ssh", *SSH_OPTS, REMOTE, remote_cmd]
 
@@ -80,6 +89,7 @@ def _dst(path: str) -> str:
 
 def _snapshot_remote() -> None:
     """Write a consistent ledger snapshot on the cluster via sqlite's backup API."""
+    _require_repo()
     result = subprocess.run(_ssh_argv(f'cd {REMOTE_REPO} && {CONFIG.remote_venv} -c "{_BACKUP_PY}"'))
     assert result.returncode == 0, f"remote db snapshot failed (rc={result.returncode})"
 

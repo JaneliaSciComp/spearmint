@@ -46,6 +46,7 @@ _DB_LOCK = threading.Lock()
 # it once, at import -- control ROOT via config (env/toml), not by assigning rundb.ROOT after import
 # (DB_PATH would keep pointing at the old ledger).
 ROOT = CONFIG.root
+assert ROOT is not None  # config._load always resolves root (env/toml/repo-root) or asserts
 DB_PATH = f"{ROOT}/rundb.db"
 
 
