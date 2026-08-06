@@ -1,6 +1,6 @@
 """One-command experiment launch: from the laptop, straight to a running driver on the cluster.
 
-    uv run python -m spearmint.launch spearmint/experiments/e00_flyem_mae_vs_lejepa.py smoke
+    uv run python -m spearmint.launch experiments/my_exp.py smoke   # or: spearmint launch ...
 
 Replaces the old commit -> jj git push -> ssh -> jj git fetch -> jj new -> run dance (and its
 .gitignore/auto-snapshot brittleness, which came from running jj on the cluster at all). Here

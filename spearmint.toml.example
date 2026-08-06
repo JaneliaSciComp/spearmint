@@ -5,7 +5,7 @@
 
 # --- LSF cluster (Janelia; GPU queue preference h200 > h100 > a100 > l4) ---
 # lsf_project = "miaai"
-# gpu_queue   = "gpu_h100"
+# gpu_queue   = "gpu_b300"
 # gpu_slots   = 12
 # cpu_queue   = "local"
 

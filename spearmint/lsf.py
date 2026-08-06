@@ -55,7 +55,7 @@ def _prefix(job_key: str, queue: str, walltime: str, slots: int, gpu: bool) -> "
 
 def gpu(queue: "str | None" = None, walltime: str = "4:00", slots: "int | None" = None) -> "Callable[[str], list[str]]":
     """Stage cmd_prefix for a single-GPU LSF job. queue/slots default to CONFIG.gpu_queue/gpu_slots
-    (cluster queue preference: gpu_h200 > gpu_h100 > gpu_a100 > gpu_l4)."""
+    (cluster queue preference: gpu_b300 > gpu_h200 > gpu_h100 > gpu_a100 > gpu_l4)."""
     queue = queue or CONFIG.gpu_queue
     slots = CONFIG.gpu_slots if slots is None else slots
     return lambda job_key: _prefix(job_key, queue, walltime, slots, gpu=True)
@@ -72,7 +72,7 @@ def submit_driver(experiment_file: str, *args: str, provenance: "dict[str, str] 
     the 7-day `local` queue) and return the LSF job id. Run this on the login node, from the
     repo root -- the driver job inherits that cwd/env and submits the per-stage bsub -K jobs
     from inside its own job. Extra ``args`` are forwarded to the experiment file verbatim (e.g.
-    a tier: ``python -m spearmint.lsf spearmint/experiments/e00_....py smoke``) and become part
+    a tier: ``python -m spearmint.lsf experiments/my_exp.py smoke``) and become part
     of the driver's job name + log path, so different tiers coexist.
 
     ``provenance`` (set by launch.py for rsync-launched runs) is threaded onto the driver

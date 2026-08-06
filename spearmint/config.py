@@ -29,9 +29,9 @@ def _repo_root() -> "str | None":
 
 @dataclass
 class SpearmintConfig:
-    # LSF cluster (Janelia; GPU queue preference h200 > h100 > a100 > l4)
+    # LSF cluster (Janelia; GPU queue preference b300 > h200 > h100 > a100 > l4)
     lsf_project: str = "miaai"
-    gpu_queue: str = "gpu_h100"
+    gpu_queue: str = "gpu_b300"
     gpu_slots: int = 12
     cpu_queue: str = "local"
     # remote (cluster) side -- repo/root/venv are relative to $HOME on remote_host
