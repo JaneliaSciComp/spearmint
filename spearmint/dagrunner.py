@@ -54,8 +54,23 @@ class Stage:
     # manages the row; the child needn't know spearmint exists.
     outdir_args: "list[str] | None" = None
     # Set by run_experiment once this job_key is confirmed done (freshly run or skipped) --
-    # never passed in at construction time, so it's excluded from __init__.
-    savedir: "str | None" = field(default=None, init=False)
+    # never passed in at construction time, so it's excluded from __init__. Internal backing
+    # for the `savedir` property; scheduler code reads/writes this directly (it owns the
+    # None-means-unresolved state), everyone else goes through the property.
+    _savedir: "str | None" = field(default=None, init=False)
+
+    @property
+    def savedir(self) -> str:
+        """The stage's resolved output dir -- a plain ``str``, so referencing it in a
+        downstream stage's command type-checks. Only available once run_experiment has
+        confirmed this stage done: reference it lazily (inside a ``cmd=lambda``, resolved at
+        submit time after requires complete), never at DAG-build time."""
+        assert self._savedir is not None, (
+            f"stage {self.name!r} ({self.job_key}) has no resolved savedir yet -- it's set once "
+            f"run_experiment confirms the stage done; reference it inside a cmd=lambda (resolved "
+            f"at submit time), not at DAG-build time"
+        )
+        return self._savedir
 
 
 class Experiment:
@@ -310,8 +325,8 @@ def run_experiment(
         external_not_done = []
         for d in s.requires:
             if d not in local:
-                d.savedir = rundb.latest_outdir(d.job_key, status="done")
-                if d.savedir is None:
+                d._savedir = rundb.latest_outdir(d.job_key, status="done")
+                if d._savedir is None:
                     external_not_done.append(d.job_key)
         assert not external_not_done, (
             f"{s.name} requires external stage(s) {external_not_done} that aren't done yet -- "
@@ -330,7 +345,7 @@ def run_experiment(
     def finalize(s: Stage, st: str) -> None:
         status[s.job_key] = st
         if st == "done":
-            s.savedir = rundb.latest_outdir(s.job_key, status="done")
+            s._savedir = rundb.latest_outdir(s.job_key, status="done")
 
     with futures.ThreadPoolExecutor(max_workers=max(1, min(MAX_PARALLEL, len(stages)))) as pool:
         while pending or running:
@@ -348,8 +363,8 @@ def run_experiment(
                     still_pending.append(s)
                     continue
                 if s not in mode:
-                    s.savedir = rundb.latest_outdir(s.job_key, status="done")
-                    if s.savedir is not None:
+                    s._savedir = rundb.latest_outdir(s.job_key, status="done")
+                    if s._savedir is not None:
                         stale = _stale_deps(s)
                         if stale:
                             print(
