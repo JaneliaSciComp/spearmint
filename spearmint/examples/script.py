@@ -34,17 +34,9 @@ def main() -> None:
         print(f"[{r.job_key}] run_id={r.run_id} writing to {r.outdir}")
         import time
 
-        # time.sleep(3)
-        # if args.stage == "root":
+        time.sleep(3)  # long enough to watch the DAG progress in the report/dashboard
         text = f"upstream={args.upstream}\n" if args.upstream else "no upstream\n"
-
-        p = Path(r.outdir) / "result.txt"
-        if p.exists():
-            p.write_text("we've been here before")
-        else:
-            time.sleep(3)
-            p.write_text(text)
-            
+        (Path(r.outdir) / "result.txt").write_text(text)
         if args.fail:
             raise RuntimeError("--fail was passed")
 

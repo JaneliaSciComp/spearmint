@@ -1,12 +1,12 @@
 """Per-project spearmint configuration.
 
-Every project/cluster constant spearmint used to hardcode (LSF project + queues, the remote host
-+ its repo/root/venv, the ssh control path, the origin bookmark, dashboard port) lives here as a
-``SpearmintConfig`` field. Values resolve, highest precedence first, from: an env var
-``SPEARMINT_<FIELD>``; a ``[tool.spearmint]`` table in a project's ``spearmint.toml`` (or, failing
-that, its ``pyproject.toml``) at the git repo root; the built-in default. Loaded once at import
-into the module-level ``CONFIG`` -- every other spearmint module reads ``CONFIG.*`` rather than a
-literal, so a new project only has to drop in its own ``spearmint.toml``.
+Every project/cluster constant spearmint used to hardcode (LSF project + queues, the run-output
+root, dashboard port) lives here as a ``SpearmintConfig`` field. Values resolve, highest
+precedence first, from: an env var ``SPEARMINT_<FIELD>``; a ``[tool.spearmint]`` table in a
+project's ``spearmint.toml`` (or, failing that, its ``pyproject.toml``) at the git repo root;
+the built-in default. Loaded once at import into the module-level ``CONFIG`` -- every other
+spearmint module reads ``CONFIG.*`` rather than a literal, so a new project only has to drop in
+its own ``spearmint.toml``.
 
 This module depends on nothing else in spearmint (rundb and friends import it, not the reverse),
 so it can compute ROOT and discover the config file with no import cycle.
@@ -34,20 +34,8 @@ class SpearmintConfig:
     gpu_queue: str = "gpu_b300"
     gpu_slots: int = 12
     cpu_queue: str = "local"
-    # remote (cluster) side -- repo/root/venv are relative to $HOME on remote_host
-    remote_host: str = "login1.int.janelia.org"
-    remote_repo: "str | None" = None  # per-project cluster dir -- REQUIRED (spearmint.toml/env) to
-    #                                   run any remote op; asserted at use so a project can't
-    #                                   silently push to another's dir (see remote._require_repo)
-    remote_root: str = "output_rundb"
-    remote_venv: str = ".venv/bin/python"
-    remote_rsync: str = "oc-rsync"
-    ssh_control_path: str = "~/.ssh/cm-spearmint-%r@%h:%p"
-    # local side
-    rsync_bin: "str | None" = None  # None -> shutil.which('oc-rsync') or the mise install path
-    root: "str | None" = None       # None -> $SPEARMINT_ROOT (env), else <repo root>/output_rundb
-    # launch / VCS (jj)
-    bookmark: "str | None" = None  # origin bookmark launch pushes to -- REQUIRED (asserted in launch)
+    # run outputs
+    root: "str | None" = None  # None -> $SPEARMINT_ROOT (env), else <repo root>/output_rundb
     # dashboard
     port: int = 8766
     refresh_seconds: int = 10

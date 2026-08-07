@@ -7,11 +7,10 @@ plus a join stage whose provenance should record all eight input run_ids. The dr
 db integrity check, the join's recorded inputs, and the status report when the DAG finishes, so
 the driver log is the whole verdict.
 
-Run on the login node, from the repo root (prerequisites: branch pushed and synced --
-``jj git fetch --remote origin && jj new lejepa-3d-dino@origin`` -- plus a one-time
-``uv pip install -e . --no-deps`` so ``import spearmint`` resolves):
+Run on the login node, from the repo root (a real checkout with spearmint installed, so
+provenance and ``import spearmint`` both resolve):
 
-    uv run python -m spearmint.lsf spearmint/examples/cluster_smoke.py
+    python -c "from spearmint import lsf; lsf.submit_driver('spearmint/examples/cluster_smoke.py')"
     tail -f output_rundb/_lsf_logs/cluster_smoke_driver.log
 """
 

@@ -1,11 +1,14 @@
 """Unified spearmint CLI: ``spearmint <command> [args]`` (installed console script) or the
 equivalent ``python -m spearmint <command> [args]``.
 
+The CLI is the viewing surface only -- the dashboard over the run ledger and the file/results
+browser. Running experiments is a library affair: an experiment file imports spearmint, builds
+an Experiment/Stages, and is executed directly (locally) or submitted as an LSF driver job via
+lsf.submit_driver (see README + examples/).
+
 A thin dispatcher -- each command just re-runs the corresponding ``python -m spearmint.<module>``
 entrypoint (with argv rewritten), so every command keeps its OWN -h/--help and usage handling
-(see spearmint._cli): ``spearmint report -h``, ``spearmint pull db``, ``spearmint launch e00.py
-smoke --replace slices`` all behave exactly as the module forms do. The per-module ``python -m
-spearmint.<module>`` forms keep working too; this is just the friendly front door.
+(see spearmint._cli).
 """
 
 import runpy
@@ -13,23 +16,19 @@ import sys
 
 # friendly command -> the module whose __main__ implements it
 COMMANDS = {
-    "launch": "spearmint.launch",        # from the laptop: push code + submit a driver on the cluster
-    "pull": "spearmint.remote",          # mirror the cluster ledger down ('pull db' = db-only, fast)
-    "report": "spearmint.report",        # terminal status table ('report --remote' pulls first)
-    "dashboard": "spearmint.dashboard",  # browser status UI (--remote / --no-browser)
+    "status": "spearmint.report",        # one-shot terminal status table over the run ledger
+    "dashboard": "spearmint.dashboard",  # browser status UI over the run ledger (--no-browser)
     "browse": "spearmint.explorer",      # serve any results directory in the browser
-    "lsf": "spearmint.lsf",              # on the login node: submit the driver job (usually via launch)
 }
 
 _USAGE = (
     "usage: spearmint <command> [args]    (`spearmint <command> -h` for per-command help)\n\n"
     "commands:\n"
-    "  launch <exp.py> <tier> [--new/--extend/--replace STAGE]   push code + run on the cluster\n"
-    "  pull [db]                                                 mirror the cluster ledger down\n"
-    "  report [--remote]                                         terminal status table\n"
-    "  dashboard [--remote] [--no-browser]                       browser status UI\n"
-    "  browse <dir> [--port N] [--no-browser]                    serve a results dir in the browser\n"
-    "  lsf <exp.py> <tier> [...]                                 (login node) submit the driver\n"
+    "  status                                    terminal status table over the run ledger\n"
+    "  dashboard [--no-browser]                  browser status UI over the run ledger\n"
+    "  browse <dir> [--port N] [--no-browser]    serve a results dir in the browser\n\n"
+    "running experiments is library API, not a CLI verb -- see the README and\n"
+    "spearmint/examples/ (`python my_exp.py`, or lsf.submit_driver on the cluster).\n"
 )
 
 

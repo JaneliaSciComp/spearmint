@@ -35,7 +35,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 
-from .config import CONFIG, _repo_root  # _repo_root re-exported: remote.push() calls rundb._repo_root
+from .config import CONFIG
 
 # Serializes THIS process's db writes across threads (dagrunner's pool threads + main loop).
 # Cross-process/cross-node safety comes from the managed-run design above, not from locking.
@@ -106,19 +106,9 @@ def _git(*args: str) -> str:
 
 
 def _provenance() -> "tuple[str, str]":
-    """(commit_id, diff text) for the code this run is executing. Normally read from git in the
-    cwd. But a run launched via spearmint.launch arrived by rsync -- the cluster tree is not this
-    machine's git checkout, and its git HEAD is meaningless -- so the LAPTOP's values are threaded
-    in via env instead: SPEARMINT_COMMIT (the base @- commit, which launch pushed to origin, so
-    it's durably recoverable) and SPEARMINT_DIFF_FILE (path to the working-copy diff text captured
-    on the laptop). See launch.py. Only the driver process needs these; it inserts the managed
-    rows (start_managed), so the env is set on the driver, not on each stage's child."""
-    commit = os.environ.get("SPEARMINT_COMMIT")
-    if commit:
-        diff_file = os.environ.get("SPEARMINT_DIFF_FILE")  # may be ~-relative (cluster home)
-        path = Path(os.path.expanduser(diff_file)) if diff_file else None
-        diff = path.read_text() if path and path.exists() else ""
-        return commit, diff
+    """(commit_id, diff text) for the code this run is executing, read from git in the cwd --
+    so run from a real checkout containing your changes (see README); a hand-copied tree's HEAD
+    would record someone else's code state."""
     return _git("rev-parse", "HEAD"), _git("diff", "HEAD")
 
 
@@ -641,13 +631,3 @@ def wipe(job_key: str) -> "list[str]":
     reconcile_wip(job_key)
     _assert_not_running(job_key)
     return gc(job_key, keep_last_n_failed=0, keep_done=False)
-
-
-if __name__ == "__main__":
-    from . import _cli
-
-    _cli.help_if_asked(__doc__)  # otherwise: a no-arg smoke self-test of the run lifecycle
-    with run(job_key="smoke-test") as r:
-        print(r.run_id, r.outdir, is_done("smoke-test"))
-    print("is_done:", is_done("smoke-test"))
-    print("latest_outdir:", latest_outdir("smoke-test"))

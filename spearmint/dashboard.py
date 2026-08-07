@@ -1,16 +1,14 @@
 """Live browser dashboard for the spearmint ledger -- the browser sibling of
 ``spearmint report``, served where you run it.
 
-    spearmint dashboard [--remote] [--no-browser]   # or: python -m spearmint.dashboard ...
+    spearmint dashboard [--no-browser]   # or: python -m spearmint.dashboard ...
 
 Reads rundb.db (via report.collect) and serves an auto-refreshing status table -- experiments x
 stages, wip/PEND/RUN/done/failed, live durations, staleness. Each stage links to a per-run page:
 ledger metadata, the err log when failed, and the run dir's artifacts rendered by
 explorer.render_dir (tables + plots, JSON trees, zoomable images). Binds 127.0.0.1 only -- run
 it where the ledger lives (on the cluster, next to the live db, connect through the ssh tunnel
-command printed at startup). With --remote each refresh first runs remote.pull_db (the ~1s
-db-only pull), a laptop-mirror convenience; without it the page reads the local ledger, which
-on-cluster is the live one. --no-browser skips opening a tab.
+command printed at startup). --no-browser skips opening a tab.
 """
 
 import html
@@ -25,7 +23,6 @@ from .config import CONFIG
 
 PORT = CONFIG.port  # spearmint's own dashboard port (config); distinct from any other UI's
 REFRESH_SECONDS = CONFIG.refresh_seconds
-_REMOTE = False  # set from argv in main(); each /table refresh pulls a fresh snapshot when True
 
 # Status-table styling on top of explorer.STYLE (which carries the theme + artifact panels).
 _STYLE = """
@@ -56,11 +53,10 @@ def _page(body: str, live: bool) -> str:
     """Wrap page ``body`` in the shared shell. ``live`` (only the home status table) adds the
     auto-refresh script that re-fetches /table into #table every REFRESH_SECONDS -- a per-run
     page passes live=False so its content is NOT clobbered by the status table on the next tick."""
-    remote = "[remote]" if _REMOTE else ""
     meta = '<div id="meta">loading…</div>' if live else ""
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>spearmint</title>
 <style>{explorer.STYLE}{_STYLE}</style></head><body>
-<h1>spearmint status <span style="color:#58a6ff">{remote}</span></h1>
+<h1>spearmint status</h1>
 {meta}
 <div id="table">{body}</div>
 {_REFRESH_SCRIPT if live else ""}</body></html>"""
@@ -79,10 +75,6 @@ def _content_kinds(job_key: str, status: str) -> "set[str]":
 
 
 def _table() -> str:
-    if _REMOTE:
-        from . import remote
-
-        remote.pull_db()
     groups = report.collect()
     kinds = {r.job_key: _content_kinds(r.job_key, r.status) for rows in groups.values() for r in rows}
     kinds = {k: v for k, v in kinds.items() if v}  # only stages that actually have something
@@ -138,11 +130,9 @@ def main() -> None:
     from . import _cli
 
     _cli.help_if_asked(__doc__)
-    extra = [a for a in sys.argv[1:] if a not in ("--remote", "--no-browser")]
+    extra = [a for a in sys.argv[1:] if a != "--no-browser"]
     if extra:
-        _cli.usage_error(__doc__, f"unexpected args {extra} (only --remote / --no-browser)")
-    global _REMOTE
-    _REMOTE = "--remote" in sys.argv[1:]
+        _cli.usage_error(__doc__, f"unexpected args {extra} (only --no-browser is accepted)")
     explorer.serve(_Handler, PORT, open_browser="--no-browser" not in sys.argv[1:])
 
 

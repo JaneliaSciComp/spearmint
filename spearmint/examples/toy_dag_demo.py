@@ -28,8 +28,4 @@ leaf = e.Stage(
 
 
 if __name__ == "__main__":
-    print(e.run(
-                new=[],
-                extend=e.stages,
-                replace=[]
-            ))
+    print(e.run())

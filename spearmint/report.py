@@ -1,13 +1,11 @@
-"""Status report over the rundb ledger (component A: run history / job status).
+"""Terminal status report over the rundb ledger (run history / job status).
 
-Read-only and reconciliation-free: on a laptop reading a pulled snapshot there's no bjobs to
-ask, so a wip row renders honestly as wip with its recency rather than being second-guessed.
-``collect()`` is pure data and ``render()`` a pure formatter -- the later component B (per-run
-artifact panels: plots/tables read from run dirs) adds a new renderer beside these without
-reworking either.
+Read-only and reconciliation-free: a wip row renders honestly as wip with its recency rather
+than being second-guessed (bjobs-based reconciliation is rundb.reconcile_wip's job, and only
+works where bjobs exists). ``collect()`` is pure data and ``render()``/``render_html()`` pure
+formatters -- dashboard.py builds its status page from the same collect().
 
-    uv run python -m spearmint.report            # render the local ledger
-    uv run python -m spearmint.report --remote   # pull a fresh ledger snapshot first (~1s)
+    spearmint status   # or: python -m spearmint.report
 """
 
 import sys
@@ -156,11 +154,6 @@ if __name__ == "__main__":
     from . import _cli
 
     _cli.help_if_asked(__doc__)
-    extra = [a for a in sys.argv[1:] if a != "--remote"]
-    if extra:
-        _cli.usage_error(__doc__, f"unexpected args {extra} (only --remote is accepted)")
-    if "--remote" in sys.argv:
-        from . import remote
-
-        remote.pull_db()
+    if sys.argv[1:]:
+        _cli.usage_error(__doc__, f"unexpected args {sys.argv[1:]}")
     print(render(collect()))

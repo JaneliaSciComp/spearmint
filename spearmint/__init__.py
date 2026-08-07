@@ -12,6 +12,14 @@ directories anywhere -- must load without that. Deferring the submodule import t
 attribute access keeps ``spearmint.run`` / ``spearmint.Experiment`` working unchanged."""
 
 import importlib
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # static view of the lazy exports below, so type checkers resolve them
+    from . import dagrunner as dagrunner
+    from . import rundb as rundb
+    from .dagrunner import Experiment as Experiment, Stage as Stage
+    from .dagrunner import closure as closure, run_experiment as run_experiment
+    from .rundb import run as run
 
 _LAZY = {  # public name -> submodule defining it (None = the name IS the submodule)
     "rundb": None,

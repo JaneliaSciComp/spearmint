@@ -15,16 +15,15 @@ Usage in an experiment file:
     train = e.Stage("train", cmd=..., cmd_prefix=lsf.gpu(walltime="8:00"))
     plot = e.Stage("plot", cmd=..., req=[train], cmd_prefix=lsf.cpu())
 
-Normally you don't call this directly -- ``spearmint.launch`` rsyncs the code up and invokes
-this over ssh. Directly, on the login node (long processes are forbidden there, so the driver
-itself becomes a 7-day CPU job on the `local` queue; it submits the per-stage jobs from inside
-its own job), from spearmint's own cluster dir (remote.REMOTE_REPO):
+Kick off from the login node, from your repo root (a real checkout -- rundb reads provenance
+from its git HEAD). Long processes are forbidden on login nodes, so don't run the experiment
+file there directly -- submit it as the driver job (a 7-day CPU job on the `local` queue that
+submits the per-stage jobs from inside its own job) via submit_driver:
 
-    cd ~/proj/mia-muvit-spearmint && uv run python -m spearmint.lsf <experiment.py> <tier>
+    python -c "from spearmint import lsf; lsf.submit_driver('experiments/my_exp.py', 'smoke')"
 """
 
 import subprocess
-import sys
 from pathlib import Path
 from typing import Callable
 
@@ -67,24 +66,17 @@ def cpu(queue: "str | None" = None, walltime: str = "1:00", slots: int = 1) -> "
     return lambda job_key: _prefix(job_key, queue, walltime, slots, gpu=False)
 
 
-def submit_driver(experiment_file: str, *args: str, provenance: "dict[str, str] | None" = None) -> str:
+def submit_driver(experiment_file: str, *args: str) -> str:
     """Submit ``experiment_file`` itself as the long-lived driver job (non-blocking bsub onto
     the 7-day `local` queue) and return the LSF job id. Run this on the login node, from the
     repo root -- the driver job inherits that cwd/env and submits the per-stage bsub -K jobs
     from inside its own job. Extra ``args`` are forwarded to the experiment file verbatim (e.g.
-    a tier: ``python -m spearmint.lsf experiments/my_exp.py smoke``) and become part
-    of the driver's job name + log path, so different tiers coexist.
-
-    ``provenance`` (set by launch.py for rsync-launched runs) is threaded onto the driver
-    process as an ``env VAR=VAL ...`` argv prefix rather than relying on LSF env propagation, so
-    the driver's managed-row inserts record the laptop's git state (see rundb._provenance). See
-    the module docstring for cluster prerequisites."""
+    a tier) and become part of the driver's job name + log path, so different tiers coexist."""
     # Args (tier, and any --new/--replace/--extend force flags) go into the driver's job name +
     # log path so runs coexist; strip flag punctuation so the name stays a clean identifier.
     stem = "_".join([Path(experiment_file).stem, *args]).replace("--", "").replace("/", "_")
     Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
     log = f"{LOG_DIR}/{stem}_driver.log"
-    env_prefix = ["env", *(f"{k}={v}" for k, v in (provenance or {}).items())] if provenance else []
     cmd = [
         "bsub",
         "-J", f"{stem}_driver",
@@ -93,7 +85,6 @@ def submit_driver(experiment_file: str, *args: str, provenance: "dict[str, str] 
         "-W", "168:00",
         "-n", "1",
         "-oo", log,
-        *env_prefix,
         "uv", "run", "python", experiment_file, *args,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -104,17 +95,3 @@ def submit_driver(experiment_file: str, *args: str, provenance: "dict[str, str] 
     jobid = ack.split("<", 1)[1].split(">", 1)[0]
     print(f"driver submitted: job {jobid} -- follow along with: tail -f {log}", flush=True)
     return jobid
-
-
-if __name__ == "__main__":
-    import os
-
-    from . import _cli
-
-    _cli.help_if_asked(__doc__)
-    if len(sys.argv) < 2:
-        _cli.usage_error(__doc__, "need an experiment file")
-    # Provenance env (set by spearmint.launch's ssh command for rsync-launched runs) rides onto
-    # the driver so its managed-row inserts record the laptop's git state, not the cluster tree's.
-    prov = {k: os.environ[k] for k in ("SPEARMINT_COMMIT", "SPEARMINT_DIFF_FILE") if k in os.environ}
-    submit_driver(sys.argv[1], *sys.argv[2:], provenance=prov or None)
