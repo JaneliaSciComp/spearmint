@@ -17,6 +17,7 @@ COMMANDS = {
     "pull": "spearmint.remote",          # mirror the cluster ledger down ('pull db' = db-only, fast)
     "report": "spearmint.report",        # terminal status table ('report --remote' pulls first)
     "dashboard": "spearmint.dashboard",  # browser status UI (--remote / --no-browser)
+    "browse": "spearmint.explorer",      # serve any results directory in the browser
     "lsf": "spearmint.lsf",              # on the login node: submit the driver job (usually via launch)
 }
 
@@ -27,6 +28,7 @@ _USAGE = (
     "  pull [db]                                                 mirror the cluster ledger down\n"
     "  report [--remote]                                         terminal status table\n"
     "  dashboard [--remote] [--no-browser]                       browser status UI\n"
+    "  browse <dir> [--port N] [--no-browser]                    serve a results dir in the browser\n"
     "  lsf <exp.py> <tier> [...]                                 (login node) submit the driver\n"
 )
 

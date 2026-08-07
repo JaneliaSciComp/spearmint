@@ -33,7 +33,7 @@ def collect() -> "dict[str, list[JobRow]]":
     """One ledger scan -> {experiment group: [JobRow, ...]}. Group = first job_key segment
     (the Experiment prefix). The latest row per job_key wins for status/recency; total sums
     every attempt's wall clock (a still-wip attempt counts up to now, so totals stay live)."""
-    conn = rundb._connect()
+    conn = rundb._connect(readonly=True)
     rows = conn.execute(
         "SELECT job_key, status, lsf_state, started_at, ended_at FROM runs ORDER BY run_id"
     ).fetchall()

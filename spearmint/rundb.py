@@ -45,8 +45,8 @@ _DB_LOCK = threading.Lock()
 # config._load ($SPEARMINT_ROOT / spearmint.toml / <repo root>/output_rundb); DB_PATH derives from
 # it once, at import -- control ROOT via config (env/toml), not by assigning rundb.ROOT after import
 # (DB_PATH would keep pointing at the old ledger).
-ROOT = CONFIG.root
-assert ROOT is not None  # config._load always resolves root (env/toml/repo-root) or asserts
+assert CONFIG.root is not None  # config._load always resolves root (env/toml/repo-root) or asserts
+ROOT: str = CONFIG.root
 DB_PATH = f"{ROOT}/rundb.db"
 
 
@@ -57,7 +57,14 @@ class Run:
     job_key: str
 
 
-def _connect() -> sqlite3.Connection:
+def _connect(readonly: bool = False) -> sqlite3.Connection:
+    """``readonly=True`` opens the ledger mode=ro -- no schema writes, no lock upgrades -- so
+    pure readers (queries, report/dashboard, possibly running beside a live driver on another
+    node) never join the sqlite writer set over the shared filesystem. When no ledger exists yet
+    it falls through to the create path below and mints an empty one, so a fresh checkout's
+    first query still works."""
+    if readonly and Path(DB_PATH).exists():
+        return sqlite3.connect(f"{Path(DB_PATH).as_uri()}?mode=ro", uri=True, timeout=30)
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.execute("""
@@ -224,7 +231,7 @@ def reconcile_wip(job_key: str) -> None:
     wipe() before deciding what to reuse/clear/delete, and by gc() before deciding what's safe
     to remove -- never something a caller needs to remember to call itself, but also callable
     directly."""
-    conn = _connect()
+    conn = _connect(readonly=True)
     rows = conn.execute(
         "SELECT run_id, pid, lsf_jobid FROM runs WHERE job_key = ? AND status = 'wip'", (job_key,)
     ).fetchall()
@@ -443,7 +450,7 @@ def _latest(column: str, job_key: str, status: "str | None"):
     if status is not None:
         sql += " AND status = ?"
         params = (job_key, status)
-    conn = _connect()
+    conn = _connect(readonly=True)
     row = conn.execute(sql + " ORDER BY run_id DESC LIMIT 1", params).fetchone()
     conn.close()
     return row[0] if row else None
@@ -484,7 +491,7 @@ def latest_run_id(job_key: str, status: "str | None" = None) -> "int | None":
 
 
 def _job_key_of(run_id: int) -> str:
-    conn = _connect()
+    conn = _connect(readonly=True)
     row = conn.execute("SELECT job_key FROM runs WHERE run_id = ?", (run_id,)).fetchone()
     conn.close()
     assert row is not None, f"no run with run_id {run_id}"
@@ -523,7 +530,7 @@ def _durations_by_status(column: str, value: str) -> "dict[str, timedelta]":
     """Wall-clock time summed per status ("wip"/"done"/"failed") over every row where ``column``
     (a literal column name -- "outdir" or "job_key", never user input) equals ``value``. Only
     statuses with at least one row are present."""
-    conn = _connect()
+    conn = _connect(readonly=True)
     rows = conn.execute(
         f"SELECT started_at, ended_at, status FROM runs WHERE {column} = ?", (value,)
     ).fetchall()
@@ -572,7 +579,7 @@ def gc(
     its most recent row. Returns the outdirs removed (or that would be removed, if dry_run).
     Never called automatically -- an explicit, on-demand cleanup action, same spirit as wipe()."""
     reconcile_wip(job_key)
-    conn = _connect()
+    conn = _connect(readonly=True)
     rows = conn.execute(
         "SELECT run_id, outdir, status FROM runs WHERE job_key = ? ORDER BY run_id", (job_key,)
     ).fetchall()
@@ -610,7 +617,7 @@ def gc_all(
     keep_done: bool = True, keep_last_n_failed: int = 1, dry_run: bool = False
 ) -> "dict[str, list[str]]":
     """gc() for every job_key that has ever recorded a run -- see gc()."""
-    conn = _connect()
+    conn = _connect(readonly=True)
     job_keys = [
         row[0]
         for row in conn.execute("SELECT DISTINCT job_key FROM runs WHERE job_key IS NOT NULL").fetchall()
