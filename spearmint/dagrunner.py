@@ -13,22 +13,36 @@ see rundb.start_managed/finish_managed and rundb.run's managed branch).
 
 import re
 import subprocess
+import sys
 from concurrent import futures
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from . import rundb
-from .config import CONFIG
 
 # Max concurrently-running stage subprocesses. A ready stage beyond this stays pending until a
 # slot frees, so [run] lines are only ever printed for stages actually executing.
-MAX_PARALLEL = CONFIG.max_parallel
+MAX_PARALLEL = 32
 
 # job_key -> the one Stage object allowed to have claimed it, this process's lifetime. Catches
 # an accidental prefix/name collision (two *different* Stage objects landing on the same
 # job_key) loudly at definition time, rather than silently letting one experiment's scheduler
 # skip its own work because of an unrelated stage that happens to share a string.
 _registered_job_keys: "dict[str, Stage]" = {}
+
+
+@dataclass
+class Config:
+    """Where an Experiment's ledger + run outputs live -- spearmint's whole per-project context,
+    as a value you pass in (no config files, no env vars, nothing resolved at import). Both
+    fields default from the experiment file's own location, so most projects never construct
+    one; to relocate outputs (e.g. onto scratch), define a single ``CFG = spearmint.Config(
+    root=...)`` in one shared module and pass it to every Experiment. The first Experiment
+    anchors the process's ledger (rundb.anchor); a second one with a conflicting root asserts."""
+
+    root: "str | None" = None  # ledger + run outputs; None -> <repo>/output_rundb
+    repo: "str | None" = None  # checkout provenance is read from; None -> the experiment file's
 
 
 # eq=False: identity-based hashing, so a Stage works as a dict/set key (mirrors
@@ -88,9 +102,26 @@ class Experiment:
     A stage can override the experiment-wide command prefix with its own ``cmd_prefix`` -- a
     CALLABLE receiving the stage's job_key, resolved at submit time -- so per-stage launchers
     that need the job identity (an LSF ``bsub -K`` prefix wanting a -J job name and -oo log
-    path; see lsf.gpu()/lsf.cpu()) still never hand-type it."""
+    path; see lsf.gpu()/lsf.cpu()) still never hand-type it.
 
-    def __init__(self, prefix: str, cmd_prefix: "list[str] | None" = None):
+    Constructing an Experiment anchors the process's ledger from ``config`` (see Config):
+    unset fields default from THIS experiment file's location -- the caller's ``__file__`` ->
+    enclosing git repo -> <repo>/output_rundb -- so the ledger follows the code that defines
+    the experiment, wherever it's launched from."""
+
+    def __init__(self, prefix: str, cmd_prefix: "list[str] | None" = None, config: "Config | None" = None):
+        if config is None:
+            config = Config()
+        repo = config.repo
+        if repo is None:
+            caller = sys._getframe(1).f_globals.get("__file__")
+            assert caller, (
+                "can't locate the experiment file (caller has no __file__, e.g. a REPL) -- "
+                "pass Config(repo=...) explicitly"
+            )
+            repo = rundb._git_root(str(Path(caller).resolve().parent))
+        rundb.anchor(config.root or f"{repo}/output_rundb", repo=repo)
+        self.config = config
         self.prefix = prefix
         self.cmd_prefix = list(cmd_prefix or [])
         self.stages: "list[Stage]" = []

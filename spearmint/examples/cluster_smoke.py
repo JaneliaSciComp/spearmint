@@ -34,7 +34,7 @@ join = e.Stage(
 
 if __name__ == "__main__":
     print(e.run())
-    conn = sqlite3.connect(rundb.DB_PATH)
+    conn = sqlite3.connect(rundb._db_path())
     print("integrity_check:", conn.execute("PRAGMA integrity_check").fetchone()[0])
     print("join inputs:", conn.execute(
         "SELECT inputs FROM runs WHERE job_key = 'smoke/join' ORDER BY run_id DESC LIMIT 1"

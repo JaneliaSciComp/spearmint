@@ -1,16 +1,11 @@
-"""Browser viewer for a results directory: .jsonl/.csv (and array-of-records .json) rendered
-as a table + interactive Plotly plot (axes selectable from columns), general JSON as a folding
-tree, PNGs as a clickable thumbnail grid with a zoomable overlay navigable along dimensions
-inferred from the filenames (raw_z10500.png -> series "raw_z", z=10500). The directory renders
-FLATTENED (recursive, with visible caps) as one page -- built for run-dir-sized result trees,
-not for exploring large nested hierarchies. Knows nothing of spearmint's ledger -- dashboard.py
-embeds render_dir() on each run's page, and standalone this serves ANY directory:
-
-    spearmint browse <dir> [--port N] [--no-browser]   # or: python -m spearmint.explorer ...
-
-Binds 127.0.0.1 only -- when the server runs on another machine (e.g. the cluster, next to the
-data), connect through the ssh tunnel command printed at startup.
-"""
+"""Rendering + serving library for results directories -- what ``spearmint browse``
+(dashboard.py) is built from. .jsonl/.csv (and array-of-records .json) render as a table +
+interactive Plotly plot (axes selectable from columns), general JSON as a folding tree, PNGs as
+a clickable thumbnail grid with a zoomable overlay navigable along dimensions inferred from the
+filenames (raw_z10500.png -> series "raw_z", z=10500). A directory renders FLATTENED
+(recursive, with visible caps) as one page -- built for run-dir-sized result trees; listing()
+provides the one-hop index over a bigger tree (content-bearing dirs -> their flattened pages).
+Knows nothing of spearmint's ledger, config, or git -- pure stdlib over a directory."""
 
 import html
 import http.server
@@ -19,17 +14,20 @@ import mimetypes
 import os
 import re
 import socket
-import sys
 import webbrowser
 from pathlib import Path
 from urllib.parse import quote
-
-PORT = 8767  # standalone default; distinct from the dashboard's so both can run at once
 
 # file extension -> content kind. .jsonl/.csv are "table" (row-oriented -> table + plot); a
 # .json is "json" (folding tree) unless it's an array of records (peeked below), which renders
 # as a table too.
 _EXT_KIND = {".png": "png", ".jsonl": "table", ".csv": "table", ".json": "json"}
+
+# content kind -> the marker glyph shown after a dir/stage name; an entry may have several.
+# "log" only occurs via the dashboard (a failed stage's LSF err log).
+CONTENT_SYMBOLS = {"png": "🖼", "table": "📊", "json": "{}", "log": "⚠"}
+
+_LISTING_CAP = 500  # rows on a listing page
 
 _PLOT_CDN = '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>'
 # Render caps (a directory is rendered whole, so a huge tree is capped, loudly -- render_dir
@@ -171,11 +169,6 @@ _IMAGE_JS = """
 })();
 """
 
-# Directory served by the standalone entrypoint (set in main); the dashboard never touches this,
-# it passes its own base explicitly.
-_DIR: "str | None" = None
-
-
 def _safe(base: str, relpath: str) -> Path:
     """Absolute path for a ``base``-relative request path, refusing to escape base (a
     served-file server must never hand out arbitrary filesystem paths). Raises if the resolved
@@ -217,6 +210,47 @@ def kinds_in(outdir: str) -> "set[str]":
             if kind:
                 kinds.add(kind)
     return kinds
+
+
+def listing(base: str) -> "list[tuple[str, set[str]]]":
+    """(relpath, kinds) for every dir under ``base`` that directly holds renderable files --
+    the one-hop index a no-ledger browse home shows (each entry links to that dir's flattened
+    render_dir page). One pruned walk (.zarr and dot-dirs skipped); sorted by relpath, so the
+    path hierarchy reads as grouping. '.' appears when base itself holds renderable files."""
+    found: "dict[str, set[str]]" = {}
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [d for d in dirnames if not d.endswith(".zarr") and not d.startswith(".")]
+        kinds: "set[str]" = set()
+        for f in filenames:
+            kind = _EXT_KIND.get(Path(f).suffix)
+            if kind == "json" and _peek_char(Path(dirpath) / f) == "[":
+                kind = "table"
+            if kind:
+                kinds.add(kind)
+        if kinds:
+            found[os.path.relpath(dirpath, base)] = kinds
+    return sorted(found.items())
+
+
+def listing_html(base: str) -> str:
+    """Home-page fragment for a plain (no-ledger) directory: the listing() table, each dir
+    linking to its /dir/<relpath> page with content-kind glyphs -- the ledger-less sibling of
+    the dashboard's status table."""
+    rows = listing(base)
+    if not rows:
+        return "<p class='note'>no renderable files under this directory</p>"
+    trs = []
+    for rel, kinds in rows[:_LISTING_CAP]:
+        marks = "".join(CONTENT_SYMBOLS[k] for k in CONTENT_SYMBOLS if k in kinds)
+        trs.append(
+            f'<tr><td class="key"><a href="/dir/{quote(rel)}">{html.escape(rel)}</a> '
+            f'<span class="mark">{marks}</span></td></tr>'
+        )
+    note = (
+        f"<p class='note'>showing {_LISTING_CAP} of {len(rows)} directories</p>"
+        if len(rows) > _LISTING_CAP else ""
+    )
+    return f"<table><tr><th>directory</th></tr>{''.join(trs)}</table>{note}"
 
 
 def _parse_tabular(path: Path) -> "tuple[list[str], list[dict]]":
@@ -479,49 +513,3 @@ def serve(handler: "type[Handler]", port: int, open_browser: bool) -> None:
     if open_browser:
         webbrowser.open(url)
     server.serve_forever()
-
-
-def _page(title: str, body: str) -> str:
-    """Minimal page shell for the standalone explorer (the dashboard has its own shell, with
-    auto-refresh and status styling)."""
-    return (f'<!doctype html><html><head><meta charset="utf-8"><title>{html.escape(title)}</title>'
-            f"<style>{STYLE}</style></head><body><h1>{html.escape(title)}</h1>{body}</body></html>")
-
-
-class _Handler(Handler):
-    def do_GET(self) -> None:
-        assert _DIR is not None  # set in main before serve()
-        if self.path == "/":
-            self._send(_page(_DIR, render_dir(_DIR, _DIR)))
-        elif self.path.startswith("/file/"):
-            from urllib.parse import unquote
-
-            self._serve_file(unquote(self.path[len("/file/"):]), _DIR)
-        else:
-            self.send_error(404)
-
-
-def main() -> None:
-    from . import _cli  # stdlib-only helpers; explorer deliberately never imports config/rundb
-
-    _cli.help_if_asked(__doc__)
-    argv = sys.argv[1:]
-    port = PORT
-    if "--port" in argv:
-        i = argv.index("--port")
-        assert i + 1 < len(argv), "--port needs a value"
-        port = int(argv[i + 1])
-        del argv[i:i + 2]
-    open_browser = "--no-browser" not in argv
-    argv = [a for a in argv if a != "--no-browser"]
-    if len(argv) != 1:
-        _cli.usage_error(__doc__, "need exactly one directory to serve")
-    d = Path(argv[0]).resolve()
-    assert d.is_dir(), f"{argv[0]} is not a directory"
-    global _DIR
-    _DIR = str(d)
-    serve(_Handler, port, open_browser)
-
-
-if __name__ == "__main__":
-    main()

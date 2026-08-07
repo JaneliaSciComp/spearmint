@@ -32,10 +32,16 @@ uv pip install -e ~/proj/spearmint
 
 ## Configure
 
-Drop a `spearmint.toml` at your repo root (or a `[tool.spearmint]` table in your
-`pyproject.toml`) naming your LSF project and queues. See `spearmint.toml.example` for every key
-and its default; any key is also overridable by an env var `SPEARMINT_<KEY>`. Config is
-discovered at the git repo root, so the CLI works without importing your project code.
+There are no config files and no env vars — configuration is plain Python values, and importing
+spearmint has no side effects. Two knobs exist:
+
+- **Where runs live**: by default, `<repo>/output_rundb`, where `<repo>` is the git root of the
+  experiment file itself. To relocate (e.g. onto scratch), define one shared
+  `CFG = spearmint.Config(root=...)` in a project module and pass it to every
+  `Experiment(..., config=CFG)`.
+- **LSF constants** (`lsf.LSF_PROJECT`, `lsf.GPU_QUEUE`, `lsf.GPU_SLOTS`, `lsf.CPU_QUEUE`):
+  sensible Janelia defaults; override per stage (`lsf.gpu(queue=...)`) or once in your shared
+  module (`lsf.LSF_PROJECT = "..."`).
 
 ## Run experiments (library API)
 
@@ -73,10 +79,13 @@ scheduler, or keep bare runs on a single machine.
 ## Watch runs + browse results (CLI)
 
 ```bash
-spearmint status                # terminal status table over the run ledger
-spearmint dashboard             # live browser status UI (per-run pages incl. artifacts)
-spearmint browse <dir>          # browse any results dir: tables+plots, JSON, zoomable images
+spearmint status [dir]          # terminal status table over a run ledger
+spearmint browse [dir]          # browser UI: if dir holds a rundb.db it's the live dashboard
+                                # (status table + per-run pages); otherwise a results-dir
+                                # browser (tables+plots, JSON trees, zoomable images)
 ```
+
+`dir` defaults to `<git root of cwd>/output_rundb`.
 
 The servers bind 127.0.0.1 on the machine they run on. Running them on the cluster, next to the
 live ledger, is the intended mode — each prints the exact tunnel command at startup, e.g.:
@@ -91,5 +100,5 @@ ssh -N -L 8766:localhost:8766 login1.int.janelia.org   # then open http://127.0.
 ## Adopting spearmint in a new project
 
 1. Add the git dependency and run `uv sync` (in your cluster checkout too).
-2. Optionally write a `spearmint.toml` with your `lsf_project`/queues.
-3. Write experiment files that `import spearmint` and build `Experiment`/`Stage`s.
+2. Write experiment files that `import spearmint` and build `Experiment`/`Stage`s. If the
+   defaults don't fit (output location, LSF project/queues), set them once in a shared module.

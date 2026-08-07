@@ -1,10 +1,10 @@
 """Run-tracking helpers: every run gets a fresh, uniquely-named output directory and a row in
 a local sqlite db (ROOT/rundb.db) recording sys.argv, the git commit, the git diff, and
 -- for dagrunner-launched runs -- the exact input run_ids consumed: full reproducibility with
-almost no caller-side state. Everything lives under ROOT ($SPEARMINT_ROOT if set, else
-<git repo root>/output_rundb -- see the constant below), deliberately separate from output/
-where real (orchestration.py-era) experiment results live -- nothing rundb writes or deletes
-can touch that tree. `run()` additionally tags a row with a `job_key` (e.g.
+almost no caller-side state. Everything lives under ROOT -- the ledger + run-output dir,
+anchored per process at first use (see anchor()/root() below; never at import, never from
+config files or env vars) -- deliberately separate from any legacy output/ tree: nothing rundb
+writes or deletes can touch anything outside ROOT. `run()` additionally tags a row with a `job_key` (e.g.
 "e00/short/pretrain_mae") and tracks wip/done/failed status, so a DAG-shaped caller
 (dagrunner.py) can ask "is this done" / "where did it last write" as a query instead of
 assuming a fixed filesystem path or trusting file sentinels.
@@ -35,19 +35,83 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 
-from .config import CONFIG
-
 # Serializes THIS process's db writes across threads (dagrunner's pool threads + main loop).
 # Cross-process/cross-node safety comes from the managed-run design above, not from locking.
 _DB_LOCK = threading.Lock()
 
-# Everything rundb ever writes or deletes lives under ROOT -- never output/. ROOT is resolved in
-# config._load ($SPEARMINT_ROOT / spearmint.toml / <repo root>/output_rundb); DB_PATH derives from
-# it once, at import -- control ROOT via config (env/toml), not by assigning rundb.ROOT after import
-# (DB_PATH would keep pointing at the old ledger).
-assert CONFIG.root is not None  # config._load always resolves root (env/toml/repo-root) or asserts
-ROOT: str = CONFIG.root
-DB_PATH = f"{ROOT}/rundb.db"
+
+# --- ledger anchoring -------------------------------------------------------------------------
+# ROOT (rundb.db + every {job_key}/runNNNNN dir + _lsf_logs) is anchored per process, at first
+# use. WHO anchors depends on the entrypoint: an Experiment anchors from its Config (see
+# dagrunner.Config); the CLI anchors from its directory argument; a bare worker script that
+# anchors nothing falls back to its own location (sys.argv[0] -> enclosing git repo ->
+# <repo>/output_rundb) at first ledger touch. Set-once: re-anchoring to the same root is a
+# no-op, a different root asserts -- two ledgers in one process would silently split the run
+# history. `repo` (the git root provenance is read from) rides along; a read-only anchor
+# (status/browse) leaves it None, and only actually recording a run requires it.
+@dataclass
+class _Anchor:
+    root: str
+    repo: "str | None"
+
+
+_ANCHOR: "_Anchor | None" = None
+
+
+def _git_root(where: str) -> str:
+    """Absolute path of the git repo enclosing ``where`` -- asserts if there isn't one."""
+    result = subprocess.run(
+        ["git", "-C", where, "rev-parse", "--show-toplevel"], capture_output=True, text=True
+    )
+    assert result.returncode == 0, (
+        f"{where!r} is not inside a git repo -- anchor the ledger explicitly "
+        f"(rundb.anchor(root), or Config(root=...) on your Experiment)"
+    )
+    return result.stdout.strip()
+
+
+def anchor(root: str, repo: "str | None" = None) -> None:
+    """Point this process's ledger at ``root``. Set-once (same root is a no-op and may fill in
+    a previously-unknown ``repo``; a different root asserts)."""
+    global _ANCHOR
+    root = os.path.abspath(root)
+    if _ANCHOR is not None:
+        assert _ANCHOR.root == root, (
+            f"ledger already anchored at {_ANCHOR.root!r} -- refusing to re-anchor at {root!r} "
+            f"(one process, one ledger)"
+        )
+        if _ANCHOR.repo is None:
+            _ANCHOR.repo = repo
+        return
+    _ANCHOR = _Anchor(root=root, repo=repo)
+
+
+def anchor_for_script(script: str) -> None:
+    """Anchor from a script's location: repo = the git root enclosing it, root =
+    <repo>/output_rundb. The bare-worker default, and what lsf.submit_driver uses for the
+    experiment file it submits."""
+    repo = _git_root(str(Path(script).resolve().parent))
+    anchor(f"{repo}/output_rundb", repo=repo)
+
+
+def root() -> str:
+    """The anchored ledger root, anchoring from sys.argv[0] first if nothing has anchored yet
+    (the bare worker-script case -- a managed stage never gets here, and an Experiment/CLI has
+    anchored explicitly before any ledger touch)."""
+    if _ANCHOR is None:
+        anchor_for_script(sys.argv[0])
+    assert _ANCHOR is not None
+    return _ANCHOR.root
+
+
+def default_root() -> str:
+    """<git root of cwd>/output_rundb -- what the CLI uses when no directory is given (argv[0]
+    would be spearmint's own module there, not the user's project)."""
+    return f"{_git_root('.')}/output_rundb"
+
+
+def _db_path() -> str:
+    return f"{root()}/rundb.db"
 
 
 @dataclass
@@ -63,10 +127,11 @@ def _connect(readonly: bool = False) -> sqlite3.Connection:
     node) never join the sqlite writer set over the shared filesystem. When no ledger exists yet
     it falls through to the create path below and mints an empty one, so a fresh checkout's
     first query still works."""
-    if readonly and Path(DB_PATH).exists():
-        return sqlite3.connect(f"{Path(DB_PATH).as_uri()}?mode=ro", uri=True, timeout=30)
-    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    db = Path(_db_path())
+    if readonly and db.exists():
+        return sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=30)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db, timeout=30)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS git_diffs (
             hash TEXT PRIMARY KEY,
@@ -106,10 +171,17 @@ def _git(*args: str) -> str:
 
 
 def _provenance() -> "tuple[str, str]":
-    """(commit_id, diff text) for the code this run is executing, read from git in the cwd --
-    so run from a real checkout containing your changes (see README); a hand-copied tree's HEAD
-    would record someone else's code state."""
-    return _git("rev-parse", "HEAD"), _git("diff", "HEAD")
+    """(commit_id, diff text) for the code this run is executing, read via git from the
+    anchored repo (the experiment/worker script's own checkout) -- so run from a real checkout
+    containing your changes (see README); a hand-copied tree's HEAD would record someone else's
+    code state."""
+    root()  # bare-worker fallback anchoring, so _ANCHOR is set (and carries the script's repo)
+    assert _ANCHOR is not None and _ANCHOR.repo is not None, (
+        "ledger was anchored without a repo (a read-only anchor, e.g. browse/status) -- "
+        "recording runs needs the checkout; anchor via Experiment/Config or anchor_for_script"
+    )
+    repo = _ANCHOR.repo
+    return _git("-C", repo, "rev-parse", "HEAD"), _git("-C", repo, "diff", "HEAD")
 
 
 def _now() -> str:
@@ -117,16 +189,16 @@ def _now() -> str:
 
 
 def _abs(outdir: str) -> str:
-    """Stored outdirs are ROOT-relative (so a db pulled from the cluster resolves against the
-    local ROOT with no path mapping); public APIs return/accept absolute paths. Tolerates a
-    legacy absolute row by passing it through untouched."""
-    return outdir if os.path.isabs(outdir) else f"{ROOT}/{outdir}"
+    """Stored outdirs are ROOT-relative (so a relocated/copied ledger dir resolves against
+    wherever it's anchored, with no path mapping); public APIs return/accept absolute paths.
+    Tolerates a legacy absolute row by passing it through untouched."""
+    return outdir if os.path.isabs(outdir) else f"{root()}/{outdir}"
 
 
 def _rel(outdir: str) -> str:
     """Inverse of _abs for querying: strip the local ROOT prefix if present, so callers can
     hand back the absolute paths our public API gave them."""
-    prefix = f"{ROOT}/"
+    prefix = f"{root()}/"
     return outdir[len(prefix):] if outdir.startswith(prefix) else outdir
 
 

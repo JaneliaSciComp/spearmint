@@ -28,41 +28,51 @@ from pathlib import Path
 from typing import Callable
 
 from . import rundb
-from .config import CONFIG
 
-# Stage outdirs don't exist at submit time (the child mints its own via rundb.run), so bsub -oo
-# logs live here instead, keyed by job name and overwritten per attempt.
-LOG_DIR = f"{rundb.ROOT}/_lsf_logs"
+# Cluster constants (Janelia defaults). Module-level on purpose: a project needing different
+# values sets them once in its own shared module (``lsf.LSF_PROJECT = "..."``) or passes
+# queue=/slots= per stage -- no config files.
+LSF_PROJECT = "miaai"
+GPU_QUEUE = "gpu_b300"  # Janelia GPU queue preference: b300 > h200 > h100 > a100 > l4
+GPU_SLOTS = 12
+CPU_QUEUE = "local"
+
+
+def _log_dir() -> str:
+    """Stage outdirs don't exist at submit time (the child mints its own via rundb.run), so
+    bsub -oo logs live here instead, keyed by job name and overwritten per attempt. Under the
+    anchored ledger root, so it resolves lazily -- never at import."""
+    return f"{rundb.root()}/_lsf_logs"
 
 
 def _prefix(job_key: str, queue: str, walltime: str, slots: int, gpu: bool) -> "list[str]":
-    Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
+    log_dir = _log_dir()
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
     name = job_key.replace("/", "_")
     return [
         "bsub", "-K",
         "-J", name,
-        "-P", CONFIG.lsf_project,
+        "-P", LSF_PROJECT,
         "-q", queue,
         "-W", walltime,
         "-n", str(slots),
         "-R", "span[hosts=1]",
         *(["-gpu", "num=1:mode=exclusive_process"] if gpu else []),
-        "-oo", f"{LOG_DIR}/{name}.log",
+        "-oo", f"{log_dir}/{name}.log",
         "uv", "run", "python",
     ]
 
 
 def gpu(queue: "str | None" = None, walltime: str = "4:00", slots: "int | None" = None) -> "Callable[[str], list[str]]":
-    """Stage cmd_prefix for a single-GPU LSF job. queue/slots default to CONFIG.gpu_queue/gpu_slots
-    (cluster queue preference: gpu_b300 > gpu_h200 > gpu_h100 > gpu_a100 > gpu_l4)."""
-    queue = queue or CONFIG.gpu_queue
-    slots = CONFIG.gpu_slots if slots is None else slots
+    """Stage cmd_prefix for a single-GPU LSF job (queue/slots default to GPU_QUEUE/GPU_SLOTS)."""
+    queue = queue or GPU_QUEUE
+    slots = GPU_SLOTS if slots is None else slots
     return lambda job_key: _prefix(job_key, queue, walltime, slots, gpu=True)
 
 
 def cpu(queue: "str | None" = None, walltime: str = "1:00", slots: int = 1) -> "Callable[[str], list[str]]":
-    """Stage cmd_prefix for a small CPU-only LSF job (queue defaults to CONFIG.cpu_queue)."""
-    queue = queue or CONFIG.cpu_queue
+    """Stage cmd_prefix for a small CPU-only LSF job (queue defaults to CPU_QUEUE)."""
+    queue = queue or CPU_QUEUE
     return lambda job_key: _prefix(job_key, queue, walltime, slots, gpu=False)
 
 
@@ -72,15 +82,18 @@ def submit_driver(experiment_file: str, *args: str) -> str:
     repo root -- the driver job inherits that cwd/env and submits the per-stage bsub -K jobs
     from inside its own job. Extra ``args`` are forwarded to the experiment file verbatim (e.g.
     a tier) and become part of the driver's job name + log path, so different tiers coexist."""
+    if rundb._ANCHOR is None:  # e.g. a bare python -c submit; a built Experiment already anchored
+        rundb.anchor_for_script(experiment_file)
     # Args (tier, and any --new/--replace/--extend force flags) go into the driver's job name +
     # log path so runs coexist; strip flag punctuation so the name stays a clean identifier.
     stem = "_".join([Path(experiment_file).stem, *args]).replace("--", "").replace("/", "_")
-    Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
-    log = f"{LOG_DIR}/{stem}_driver.log"
+    log_dir = _log_dir()
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    log = f"{log_dir}/{stem}_driver.log"
     cmd = [
         "bsub",
         "-J", f"{stem}_driver",
-        "-P", CONFIG.lsf_project,
+        "-P", LSF_PROJECT,
         "-q", "local",
         "-W", "168:00",
         "-n", "1",

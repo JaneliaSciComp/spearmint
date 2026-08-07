@@ -5,7 +5,9 @@ than being second-guessed (bjobs-based reconciliation is rundb.reconcile_wip's j
 works where bjobs exists). ``collect()`` is pure data and ``render()``/``render_html()`` pure
 formatters -- dashboard.py builds its status page from the same collect().
 
-    spearmint status   # or: python -m spearmint.report
+    spearmint status [dir]   # or: python -m spearmint.report [dir]
+
+``dir`` is the ledger/run-output dir; default <git root of cwd>/output_rundb.
 """
 
 import sys
@@ -103,21 +105,18 @@ def lsf_log_relpath(job_key: str) -> str:
     return f"_lsf_logs/{job_key.replace('/', '_')}.log"
 
 
-# content kind -> the marker glyph shown (trailing) after a stage's name; a stage may have
-# several. dashboard._content_kinds resolves which kinds each stage's run dir actually holds.
-CONTENT_SYMBOLS = {"png": "🖼", "table": "📊", "json": "{}", "log": "⚠"}
-
-
 def render_html(groups: "dict[str, list[JobRow]]", kinds: "dict[str, set[str]] | None" = None) -> str:
     """The status table as an HTML fragment (no <html>/<head> shell -- dashboard.py wraps it,
     and swaps just this fragment in on each refresh). Pure formatter over collect()'s data, the
     HTML sibling of render(). Each stage links to its component-B run report (/run/<job_key>);
     a failed stage's badge links to its err log (/file/<lsf log>) -- both dashboard.py routes.
     ``kinds`` maps job_key -> the set of content kinds its run page holds (png/table/json/log,
-    resolved from the local mirror by dashboard._content_kinds); each gets a trailing glyph
-    (CONTENT_SYMBOLS) so you can see at a glance what's there."""
+    resolved by dashboard._content_kinds); each gets a trailing glyph
+    (explorer.CONTENT_SYMBOLS) so you can see at a glance what's there."""
     import html
     from urllib.parse import quote
+
+    from .explorer import CONTENT_SYMBOLS
 
     kinds = kinds or {}
     rows = []
@@ -154,6 +153,7 @@ if __name__ == "__main__":
     from . import _cli
 
     _cli.help_if_asked(__doc__)
-    if sys.argv[1:]:
-        _cli.usage_error(__doc__, f"unexpected args {sys.argv[1:]}")
+    if len(sys.argv[1:]) > 1:
+        _cli.usage_error(__doc__, f"unexpected args {sys.argv[2:]} (at most one ledger dir)")
+    rundb.anchor(sys.argv[1] if sys.argv[1:] else rundb.default_root())
     print(render(collect()))

@@ -1,10 +1,10 @@
 """Unified spearmint CLI: ``spearmint <command> [args]`` (installed console script) or the
 equivalent ``python -m spearmint <command> [args]``.
 
-The CLI is the viewing surface only -- the dashboard over the run ledger and the file/results
-browser. Running experiments is a library affair: an experiment file imports spearmint, builds
-an Experiment/Stages, and is executed directly (locally) or submitted as an LSF driver job via
-lsf.submit_driver (see README + examples/).
+The CLI is the viewing surface only -- a status table and a browser over run ledgers / results
+directories. Running experiments is a library affair: an experiment file imports spearmint,
+builds an Experiment/Stages, and is executed directly (locally) or submitted as an LSF driver
+job via lsf.submit_driver (see README + examples/).
 
 A thin dispatcher -- each command just re-runs the corresponding ``python -m spearmint.<module>``
 entrypoint (with argv rewritten), so every command keeps its OWN -h/--help and usage handling
@@ -16,19 +16,18 @@ import sys
 
 # friendly command -> the module whose __main__ implements it
 COMMANDS = {
-    "status": "spearmint.report",        # one-shot terminal status table over the run ledger
-    "dashboard": "spearmint.dashboard",  # browser status UI over the run ledger (--no-browser)
-    "browse": "spearmint.explorer",      # serve any results directory in the browser
+    "status": "spearmint.report",        # one-shot terminal status table over a run ledger
+    "browse": "spearmint.dashboard",     # browser UI: ledger dashboard, or any results dir
 }
 
 _USAGE = (
     "usage: spearmint <command> [args]    (`spearmint <command> -h` for per-command help)\n\n"
     "commands:\n"
-    "  status                                    terminal status table over the run ledger\n"
-    "  dashboard [--no-browser]                  browser status UI over the run ledger\n"
-    "  browse <dir> [--port N] [--no-browser]    serve a results dir in the browser\n\n"
-    "running experiments is library API, not a CLI verb -- see the README and\n"
-    "spearmint/examples/ (`python my_exp.py`, or lsf.submit_driver on the cluster).\n"
+    "  status [dir]                              terminal status table over a run ledger\n"
+    "  browse [dir] [--port N] [--no-browser]    browser UI: the ledger dashboard when dir\n"
+    "                                            holds a rundb.db, else a results-dir browser\n\n"
+    "dir defaults to <git root of cwd>/output_rundb. Running experiments is library API, not\n"
+    "a CLI verb -- see the README and spearmint/examples/.\n"
 )
 
 
