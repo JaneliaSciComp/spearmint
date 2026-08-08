@@ -9,17 +9,18 @@ writes or deletes can touch anything outside ROOT. `run()` additionally tags a r
 (dagrunner.py) can ask "is this done" / "where did it last write" as a query instead of
 assuming a fixed filesystem path or trusting file sentinels.
 
-`job_key` and the new/extend/replace mode are both optional -- left unset, they're parsed out of
-this process's own sys.argv, so a worker script needs none of its own --job-key/--extend/--replace
-argparse plumbing (see script.py).
+`job_key` and the new/extend/replace mode are both optional -- left unset, they're read from
+$SPEARMINT_JOB_KEY/$SPEARMINT_MODE (set by dagrunner via an ``env`` prefix on the stage command,
+invisible to the worker's own hydra/argparse parsing), so a worker script needs no spearmint
+plumbing of its own (see script.py).
 
 WHO writes the db depends on how a run was launched. A bare run (no dagrunner) writes its own
 rows. A dagrunner-launched stage does NOT: sqlite's fcntl locking is unreliable when several
 compute nodes hit one db on a shared filesystem ("disk I/O error" under concurrency), so the
 DRIVER -- one process on one node, writes additionally serialized by _DB_LOCK -- inserts the
 wip row before launching (start_managed) and marks done/failed from the stage's exit code
-(finish_managed), threading the row identity to the child via --run-row/--run-outdir argv, at
-which point the child's rundb.run() skips all db access (see run()).
+(finish_managed), threading the row identity to the child via $SPEARMINT_RUN_ROW/
+$SPEARMINT_RUN_OUTDIR, at which point the child's rundb.run() skips all db access (see run()).
 """
 
 import json
@@ -202,47 +203,39 @@ def _rel(outdir: str) -> str:
     return outdir[len(prefix):] if outdir.startswith(prefix) else outdir
 
 
-def _job_key_from_argv() -> str:
-    """Default job_key when the caller doesn't pass one explicitly: whatever follows --job-key
-    in this process's own sys.argv (how dagrunner.py's stages tag their subprocess -- see
-    Experiment.Stage), or else just the script's own name (Path(sys.argv[0]).stem), so a worker
-    run directly with no dagrunner involved still gets a reasonable, queryable identity instead
-    of none at all. Deliberately ignores the rest of argv -- baking other args in (e.g. a
-    resolved --upstream path) would make the SAME script's identity drift between invocations
-    whose args happen to differ, so extend/replace/gc/is_done could never relate them even when
-    you consider them the same job; if you want per-argument distinctness for repeated direct
-    runs, pass an explicit --job-key yourself, same as dagrunner does for its own stages. Lets
-    every worker script skip its own --job-key argparse plumbing entirely."""
-    argv = sys.argv[1:]
-    if "--job-key" in argv:
-        return argv[argv.index("--job-key") + 1]
-    return Path(sys.argv[0]).stem
+def _job_key_from_env() -> str:
+    """Default job_key when the caller doesn't pass one explicitly: $SPEARMINT_JOB_KEY (how
+    dagrunner.py's stages tag their subprocess, via the ``env`` prefix run_experiment prepends
+    -- invisible to the worker's own hydra/argparse parsing), or else just the script's own name
+    (Path(sys.argv[0]).stem), so a worker run directly with no dagrunner involved still gets a
+    reasonable, queryable identity instead of none at all. Deliberately ignores argv -- baking
+    args in (e.g. a resolved --upstream path) would make the SAME script's identity drift
+    between invocations whose args happen to differ, so extend/replace/gc/is_done could never
+    relate them even when you consider them the same job; if you want per-argument distinctness
+    for repeated direct runs, set SPEARMINT_JOB_KEY yourself, same as dagrunner does for its own
+    stages. Lets every worker script skip its own job-key plumbing entirely."""
+    return os.environ.get("SPEARMINT_JOB_KEY") or Path(sys.argv[0]).stem
 
 
-def _mode_from_argv() -> str:
-    """Default mode when the caller doesn't pass one explicitly: whichever of --replace/--extend
-    is a bare flag in sys.argv (how dagrunner.py's forced stages signal it -- see
-    Experiment.Stage's full_cmd), else "new". Lets every worker script skip its own
-    --replace/--extend/--new argparse plumbing entirely."""
-    if "--replace" in sys.argv:
-        return "replace"
-    if "--extend" in sys.argv:
-        return "extend"
-    return "new"
+def _mode_from_env() -> str:
+    """Default mode when the caller doesn't pass one explicitly: $SPEARMINT_MODE (set by
+    dagrunner's ``env`` prefix -- see run_experiment), else "new". Lets every worker script skip
+    its own new/extend/replace plumbing entirely."""
+    mode = os.environ.get("SPEARMINT_MODE", "new")
+    assert mode in ("new", "extend", "replace"), f"bad $SPEARMINT_MODE {mode!r}"
+    return mode
 
 
-def _managed_from_argv() -> "tuple[int, str] | None":
+def _managed_from_env() -> "tuple[int, str] | None":
     """(run_id, absolute outdir) when this process is a dagrunner-MANAGED stage -- the driver
-    already inserted our row and appended ``--run-row <id> --run-outdir <path>`` to our argv --
-    else None. In the managed case run() must do no db work at all: several compute nodes
-    hitting one sqlite db over the shared filesystem is exactly what broke (see module
-    docstring); the driver owns our row's whole lifecycle."""
-    argv = sys.argv[1:]
-    if "--run-row" not in argv:
+    already inserted our row and set ``SPEARMINT_RUN_ROW``/``SPEARMINT_RUN_OUTDIR`` in our
+    environment -- else None. In the managed case run() must do no db work at all: several
+    compute nodes hitting one sqlite db over the shared filesystem is exactly what broke (see
+    module docstring); the driver owns our row's whole lifecycle."""
+    run_id = os.environ.get("SPEARMINT_RUN_ROW")
+    if run_id is None:
         return None
-    run_id = int(argv[argv.index("--run-row") + 1])
-    outdir = argv[argv.index("--run-outdir") + 1]
-    return run_id, outdir
+    return int(run_id), os.environ["SPEARMINT_RUN_OUTDIR"]
 
 
 def _lsf_alive(jobid: str) -> bool:
@@ -336,7 +329,7 @@ def _start(
     are left alone; this only clears the one attempt immediately being superseded, not the whole
     history (for that, see ``wipe()``). If job_key has no prior outdir at all, "replace" just
     behaves like "new" (nothing to clear). ``job_key``/``mode`` fall back to
-    ``_job_key_from_argv()``/``_mode_from_argv()`` when not given explicitly.
+    ``_job_key_from_env()``/``_mode_from_env()`` when not given explicitly.
 
     Before any of that, ``reconcile_wip(job_key)`` runs (see its docstring) so a "wip" row left
     behind by a hard-killed process (SIGKILL etc.) gets corrected to "failed" instead of being
@@ -351,7 +344,7 @@ def _start(
     prefixes and stage names contain "_" themselves). The worker script's name isn't a path
     segment -- it's already recorded in the row's argv0, and stages of one experiment that use
     different worker scripts should still land under one experiment directory. A bare
-    no---job-key run gets {ROOT}/{script stem}/run{run_id:05d} for free, since the script stem
+    no-job-key run gets {ROOT}/{script stem}/run{run_id:05d} for free, since the script stem
     is exactly its fallback job_key. run_id is the already-unique-per-row global counter rather
     than a separately tracked per-job_key one, since it's sitting right here with nothing extra
     to compute. The db row stores the ROOT-RELATIVE form ({job_key}/run{run_id:05d}, see _abs/
@@ -362,9 +355,9 @@ def _start(
     ``Path(r.outdir).mkdir(...)`` boilerplate, and can never forget it.
     """
     if job_key is None:
-        job_key = _job_key_from_argv()
+        job_key = _job_key_from_env()
     if mode is None:
-        mode = _mode_from_argv()
+        mode = _mode_from_env()
     assert mode in ("new", "extend", "replace"), f"bad mode {mode!r}"
     reconcile_wip(job_key)
     _assert_not_running(job_key)
@@ -419,7 +412,8 @@ def _finish(run_id: int, status: str) -> None:
 def start_managed(job_key: str, mode: str, argv: "list[str]", inputs: "list[int]") -> Run:
     """The DRIVER-side half of a managed run: insert the wip row for a stage it is about to
     launch, recording the stage's command and its exact input run_ids at insert. The driver
-    then threads the identity to the child via --run-row/--run-outdir (see run()) and closes
+    then threads the identity to the child via $SPEARMINT_RUN_ROW/$SPEARMINT_RUN_OUTDIR (see
+    run()) and closes
     the lifecycle with finish_managed() when the stage's process exits. The row inherits the
     driver's own pid/LSB_JOBID for liveness until set_lsf_jobid() records the stage's real job
     id from bsub's submission ack -- either way reconcile_wip has something true to check."""
@@ -463,17 +457,16 @@ def run(job_key: "str | None" = None, mode: "str | None" = None):
     failed (+ reraise) on any other exception. ``sys.exit(0)``/a bare ``SystemExit()`` counts as
     a clean exit too -- only a truthy exit code marks it failed.
 
-    MANAGED runs (launched by dagrunner, detected via --run-row/--run-outdir in our argv --
-    see _managed_from_argv) touch the db not at all: the driver already inserted our row and
+    MANAGED runs (launched by dagrunner, detected via $SPEARMINT_RUN_ROW/$SPEARMINT_RUN_OUTDIR
+    in our environment -- see _managed_from_env) touch the db not at all: the driver already inserted our row and
     will mark done/failed from our exit code, which the try/except below still shapes
     faithfully (exceptions propagate -> nonzero exit -> failed). This is what makes cluster
     runs safe -- compute nodes never write the shared-filesystem sqlite file.
 
     Both args are optional: left unset, ``job_key`` and ``mode`` ("new"/"extend"/"replace", see
-    ``_start``) are parsed straight out of this invocation's own sys.argv
-    (``_job_key_from_argv``/``_mode_from_argv``) -- a caller wired up through dagrunner.py never
-    needs its own --job-key/--extend/--replace argparse plumbing, it just needs to forward its
-    unrecognized args (see script.py).
+    ``_start``) are read from this process's $SPEARMINT_JOB_KEY/$SPEARMINT_MODE
+    (``_job_key_from_env``/``_mode_from_env``) -- a caller wired up through dagrunner.py never
+    needs any spearmint plumbing of its own (see script.py).
 
     "extend" only hands the script back the SAME directory it wrote before -- whether the
     script actually reads existing state out of that directory and picks up where it left off,
@@ -484,10 +477,10 @@ def run(job_key: "str | None" = None, mode: "str | None" = None):
     This is the sentinel-file lifecycle (.start/.end/.done) from orchestration.py's bash
     payload, as one atomic DB row instead of three separate files that can get out of sync (a
     stray .log with no .done, etc.)."""
-    managed = _managed_from_argv()
+    managed = _managed_from_env()
     if managed is not None:
         run_id, outdir = managed
-        yield Run(run_id=run_id, outdir=outdir, job_key=job_key or _job_key_from_argv())
+        yield Run(run_id=run_id, outdir=outdir, job_key=job_key or _job_key_from_env())
         return
     r = _start(job_key, mode)
     try:

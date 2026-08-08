@@ -2,12 +2,12 @@
 
 A stage becomes an LSF job purely through its command: ``bsub -K <flags> uv run python ...``
 blocks until the job finishes and exits with the job's own exit code, so dagrunner's scheduler
-needs no changes at all -- MAX_PARALLEL simply caps in-flight LSF jobs. bsub treats everything
-after its flags as the command argv, so dagrunner appending --job-key/--extend/--replace at the
-END still works. Constraint: stage argv must stay free of shell metacharacters (LSF re-joins the
-argv through a shell on the compute node) -- spearmint payloads are plain
-``uv run python script.py ...``, which is fine. Jobs inherit the submission cwd and environment,
-so submit from the repo root.
+needs no changes at all -- MAX_PARALLEL simply caps in-flight LSF jobs. Jobs inherit the
+submission cwd and environment -- so submit from the repo root, and the ``env SPEARMINT_*=...``
+identity prefix run_experiment wraps around this whole command reaches the worker on the
+compute node (the vars ride the submission environment through bsub). Constraint: stage argv
+must stay free of shell metacharacters (LSF re-joins the argv through a shell on the compute
+node) -- spearmint payloads are plain ``uv run python script.py ...``, which is fine.
 
 Usage in an experiment file:
 

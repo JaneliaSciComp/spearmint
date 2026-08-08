@@ -7,14 +7,14 @@ resolves it via rundb.latest_outdir() before building this command), writes one 
 its own outdir, and exits 0 -- or raises with --fail, to exercise the abort-on-failure /
 abandon-dependents path in dagrunner.run_experiment.
 
-No --job-key/--extend/--replace of its own -- rundb.run() parses those straight out of
-sys.argv (see rundb._job_key_from_argv/_mode_from_argv), so this parser only needs to declare
-its own actual flags and pass through whatever else it doesn't recognize.
+No job-key/mode plumbing of its own -- rundb.run() reads $SPEARMINT_JOB_KEY/$SPEARMINT_MODE
+(set by dagrunner's ``env`` prefix on the stage command; see rundb._job_key_from_env/
+_mode_from_env), so this parser only declares its own actual flags.
 
-    uv run python spearmint/examples/script.py --job-key demo/root
-    uv run python spearmint/examples/script.py --job-key demo/mid --upstream output_rundb/demo/root/run00001
-    uv run python spearmint/examples/script.py --job-key demo/root --fail
-    uv run python spearmint/examples/script.py --job-key demo/root --extend
+    SPEARMINT_JOB_KEY=demo/root uv run python spearmint/examples/script.py
+    SPEARMINT_JOB_KEY=demo/mid uv run python spearmint/examples/script.py --upstream output_rundb/demo/root/run00001
+    SPEARMINT_JOB_KEY=demo/root uv run python spearmint/examples/script.py --fail
+    SPEARMINT_JOB_KEY=demo/root SPEARMINT_MODE=extend uv run python spearmint/examples/script.py
 """
 
 import argparse
@@ -28,7 +28,7 @@ def main() -> None:
     p.add_argument("--upstream", default=None, help="an upstream stage's already-resolved outdir")
     p.add_argument("--fail", action="store_true", help="raise after writing, to test abandon-on-failure")
     p.add_argument("--stage", help="stage name")
-    args, _ = p.parse_known_args()
+    args = p.parse_args()
 
     with rundb.run() as r:
         print(f"[{r.job_key}] run_id={r.run_id} writing to {r.outdir}")

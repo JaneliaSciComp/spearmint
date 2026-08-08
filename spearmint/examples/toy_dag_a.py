@@ -10,7 +10,7 @@ that it's already done, so it never re-runs it.
 import spearmint as O
 from shared_preprocess import preprocess
 
-e = O.Experiment(prefix="e_a", cmd_prefix=["uv", "run", "python"])
+e = O.Experiment(prefix="e_a", cmd_prefix=["uv run python"])
 own = e.Stage(
     "own_stage",
     cmd=lambda: ["spearmint/examples/script.py", "--upstream", preprocess.savedir],

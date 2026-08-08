@@ -51,21 +51,20 @@ class Config:
 class Stage:
     name: str
     job_key: str
-    # Builder resolved at submit time (after `requires` are confirmed done), taking this run's
-    # mode ("new"/"extend"/"replace") so it can append a bare --extend/--replace flag (nothing
-    # for the default "new") -- rundb.py parses that flag straight out of its own sys.argv and
-    # resolves the actual outdir from job_key+mode itself, so this scheduler never has to look
-    # one up or special-case any mode's command. Same "lazy command" shape as orchestration.py's
-    # _eval_cmd reading a threshold file written by an earlier stage. By the time THIS builder
-    # runs, every stage in `requires` already has an up-to-date `.savedir` (run_experiment sets
-    # it right before calling this) -- reference ``upstream_stage.savedir`` directly instead of
-    # querying rundb.latest_outdir(upstream_stage.job_key) yourself.
-    command: Callable[[str], "list[str]"]
+    # Builder resolved at submit time (after `requires` are confirmed done) -- same "lazy
+    # command" shape as orchestration.py's _eval_cmd reading a threshold file written by an
+    # earlier stage. Identity (job_key, mode, managed row) is NOT the builder's concern:
+    # run_experiment prepends it as an ``env SPEARMINT_*=...`` prefix, invisible to the
+    # worker's own argv parsing. By the time THIS builder runs, every stage in `requires`
+    # already has an up-to-date `.savedir` (run_experiment sets it right before calling this)
+    # -- reference ``upstream_stage.savedir`` directly instead of querying
+    # rundb.latest_outdir(upstream_stage.job_key) yourself.
+    command: Callable[[], "list[str]"]
     requires: "list[Stage]" = field(default_factory=list)
-    # PLAIN-command stage (hydra/argparse workers that would choke on spearmint's argv): when
-    # set, run_experiment appends ONLY these templates formatted with the run's outdir (e.g.
-    # "+run_dir={}") -- no --job-key/--run-row/mode flags. Legit because the driver fully
-    # manages the row; the child needn't know spearmint exists.
+    # PLAIN-command stage (a worker that never calls rundb itself): when set, run_experiment
+    # appends these templates formatted with the run's outdir (e.g. "+run_dir={}") -- the
+    # worker's own output override -- and skips the SPEARMINT_* env prefix. Legit because the
+    # driver fully manages the row; the child needn't know spearmint exists.
     outdir_args: "list[str] | None" = None
     # Set by run_experiment once this job_key is confirmed done (freshly run or skipped) --
     # never passed in at construction time, so it's excluded from __init__. Internal backing
@@ -95,9 +94,9 @@ class Experiment:
 
     job_key is always ``f"{prefix}/{name}"`` -- never hand-typed at each call site, so a
     stage's own definition and whatever references it (a downstream ``req=``, or
-    ``stage.savedir`` in a sibling's ``cmd=``) can never drift out of sync. ``--job-key
-    <job_key>`` is appended to every stage's command automatically for the same reason (see
-    ``script.py``, which reads it via argparse).
+    ``stage.savedir`` in a sibling's ``cmd=``) can never drift out of sync. run_experiment
+    hands it to every native stage automatically for the same reason, as $SPEARMINT_JOB_KEY
+    via an ``env`` prefix (see ``script.py``, whose rundb.run() reads it from the environment).
 
     A stage can override the experiment-wide command prefix with its own ``cmd_prefix`` -- a
     CALLABLE receiving the stage's job_key, resolved at submit time -- so per-stage launchers
@@ -142,15 +141,11 @@ class Experiment:
             f"objects landing on the same job_key by coincidence is almost always a bug, not "
             f"intentional sharing. See shared_preprocess.py for the intended pattern."
         )
-        # A plain-command stage (outdir_args set) gets no spearmint argv at all -- its worker
-        # (hydra, argparse) wouldn't survive it; run_experiment appends the formatted outdir
-        # templates instead.
-        native = outdir_args is None
-        full_cmd = lambda mode="replace": [
+        # Identity is run_experiment's job (env prefix / outdir_args); this builder only
+        # composes launcher prefix + the stage's own command.
+        full_cmd = lambda: [
             *(self.cmd_prefix if cmd_prefix is None else cmd_prefix(job_key)),
             *cmd(),
-            *(["--job-key", job_key] if native else []),
-            *([f"--{mode}"] if native and mode != "new" else []),
         ]
         s = Stage(
             name=name, job_key=job_key, command=full_cmd, requires=req or [], outdir_args=outdir_args
@@ -304,13 +299,9 @@ def run_experiment(
     ``new``/``extend``/``replace`` each force a stage to run despite already being done, plus
     its transitive dependents (their own prior output was computed against the old version of
     this stage's output, so they need to see the new one too) -- those dependents always get a
-    plain ``new`` treatment regardless of which bucket the seed stage came from. All three just
-    become a bare --extend/--replace flag appended onto the stage's own command
-    (Experiment.Stage's ``full_cmd``, above; nothing is appended for the default "new");
-    rundb.py parses that flag out of its own sys.argv and resolves what it actually means for
-    the outdir (fresh / resume job_key's last one / clear-then-reuse job_key's last one) once
-    it's running inside the subprocess -- this scheduler never looks up or touches a path
-    itself:
+    plain ``new`` treatment regardless of which bucket the seed stage came from. The mode goes
+    to rundb.start_managed, which resolves what it actually means for the outdir (fresh /
+    resume job_key's last one / clear-then-reuse job_key's last one):
       new:     a normal from-scratch re-attempt, fresh directory.
       extend:  resume into the SAME directory the stage last wrote.
       replace: clear job_key's most recent outdir and start over in that SAME directory --
@@ -410,7 +401,7 @@ def run_experiment(
                     still_pending.append(s)  # ready, but all slots busy -- retry next scan
                     continue
                 stage_mode = mode.get(s, "replace")
-                base_cmd = s.command(stage_mode)
+                base_cmd = s.command()
                 # Provenance, known exactly at launch: the dep runs whose outputs this stage is
                 # about to read (all confirmed done by this point) -- stamped at row insert.
                 input_ids: "list[int]" = []
@@ -420,11 +411,21 @@ def run_experiment(
                     input_ids.append(rid)
                 # This DRIVER inserts the stage's row (managed run) and closes it from the exit
                 # code below -- the child never touches the db (compute nodes writing one sqlite
-                # file over the shared filesystem is what broke). --run-row/--run-outdir hand
-                # the child its identity; rundb.run() sees them and skips all db work.
+                # file over the shared filesystem is what broke). An ``env SPEARMINT_*=...``
+                # prefix hands a native child its identity, invisible to its own argv parsing
+                # (identity itself is recorded on the row, not in argv); rundb.run() sees
+                # RUN_ROW/RUN_OUTDIR and skips all db work. bsub ships the submission
+                # environment to the compute node, so the prefix may wrap a bsub launcher.
                 row = rundb.start_managed(s.job_key, stage_mode, argv=base_cmd, inputs=input_ids)
                 if s.outdir_args is None:
-                    cmd = [*base_cmd, "--run-row", str(row.run_id), "--run-outdir", row.outdir]
+                    cmd = [
+                        "env",
+                        f"SPEARMINT_JOB_KEY={s.job_key}",
+                        f"SPEARMINT_MODE={stage_mode}",
+                        f"SPEARMINT_RUN_ROW={row.run_id}",
+                        f"SPEARMINT_RUN_OUTDIR={row.outdir}",
+                        *base_cmd,
+                    ]
                 else:
                     cmd = [*base_cmd, *(a.format(row.outdir) for a in s.outdir_args)]
                 print(f"[run] {s.name}: {' '.join(cmd)}", flush=True)

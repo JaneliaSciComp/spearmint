@@ -66,9 +66,17 @@ python -c "from spearmint import lsf; lsf.submit_driver('experiments/my_exp.py',
 tail -f output_rundb/_lsf_logs/my_exp_smoke_driver.log
 ```
 
-Worker scripts need no spearmint plumbing beyond `with spearmint.run() as r:` (or none at all —
-a hydra/argparse worker gets its run dir injected via the stage's `outdir_args`). See
-`spearmint/examples/` for runnable toy DAGs (no cluster needed — `python -m
+Workers never see spearmint in their argv — run identity travels as `SPEARMINT_*` environment
+variables, invisible to hydra/argparse/click parsing. So a worker adopts at one of two levels:
+
+- **Untouched** (zero changes): declare `outdir_args` templates on the stage and the run dir is
+  rendered into the worker's *own* flags — for any vanilla hydra app,
+  `outdir_args=["hydra.run.dir={}"]` works with no app changes at all.
+- **Self-recording** (two lines): wrap the work in `with spearmint.run() as r:` and write into
+  `r.outdir`. Strict `parse_args()` and hydra apps are both fine — there are no spearmint flags
+  to tolerate.
+
+See `spearmint/examples/` for runnable toy DAGs (no cluster needed — `python -m
 spearmint.examples.toy_dag_demo`) and a real-LSF smoke test (`examples/cluster_smoke.py`).
 
 One constraint to know: only the driver process writes the ledger — stages it launches never
