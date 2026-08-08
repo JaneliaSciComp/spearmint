@@ -64,8 +64,10 @@ class Stage:
     requires: "list[Stage]" = field(default_factory=list)
     # PLAIN-command stage (a worker that never calls rundb itself): when set, run_experiment
     # appends these templates formatted with the run's outdir (e.g. "+run_dir={}") -- the
-    # worker's own output override -- and skips the SPEARMINT_* env prefix. Legit because the
-    # driver fully manages the row; the child needn't know spearmint exists.
+    # worker's own output override -- so the child needn't know spearmint exists. The
+    # SPEARMINT_* env prefix rides along regardless (harmless to a worker that doesn't look;
+    # keeps a worker that DOES call rundb.run() managed instead of silently writing the db
+    # from a compute node, and enables hydra's ${oc.env:SPEARMINT_RUN_OUTDIR,...}).
     outdir_args: "list[str] | None" = None
     # Set by run_experiment once this job_key is confirmed done (freshly run or skipped) --
     # never passed in at construction time, so it's excluded from __init__. Internal backing
@@ -412,30 +414,34 @@ def run_experiment(
                     input_ids.append(rid)
                 # This DRIVER inserts the stage's row (managed run) and closes it from the exit
                 # code below -- the child never touches the db (compute nodes writing one sqlite
-                # file over the shared filesystem is what broke). An ``env SPEARMINT_*=...``
-                # prefix hands a native child its identity, invisible to its own argv parsing
-                # (identity itself is recorded on the row, not in argv); rundb.run() sees
-                # RUN_ROW/RUN_OUTDIR and skips all db work. bsub ships the submission
-                # environment to the compute node, so the prefix may wrap a bsub launcher.
-                row = rundb.start_managed(s.job_key, stage_mode, argv=base_cmd, inputs=input_ids)
-                if s.outdir_args is None:
-                    # $SPEARMINT_INPUTS: the deps' resolved outdirs (requires order), so a
-                    # fan-in worker reads r.inputs instead of taking N paths via its own argv.
-                    inputs_env = (
-                        [f"SPEARMINT_INPUTS={os.pathsep.join(d.savedir for d in s.requires)}"]
-                        if s.requires else []
-                    )
-                    cmd = [
-                        "env",
-                        f"SPEARMINT_JOB_KEY={s.job_key}",
-                        f"SPEARMINT_MODE={stage_mode}",
-                        f"SPEARMINT_RUN_ROW={row.run_id}",
-                        f"SPEARMINT_RUN_OUTDIR={row.outdir}",
-                        *inputs_env,
-                        *base_cmd,
-                    ]
-                else:
-                    cmd = [*base_cmd, *(a.format(row.outdir) for a in s.outdir_args)]
+                # file over the shared filesystem is what broke). EVERY stage gets the
+                # ``env SPEARMINT_*=...`` identity prefix, invisible to its own argv parsing
+                # (identity itself is recorded on the row, not in argv): a native child's
+                # rundb.run() sees RUN_ROW/RUN_OUTDIR and skips all db work -- and so does an
+                # outdir_args worker that happens to call rundb.run() anyway (without the env it
+                # would silently become an UNMANAGED compute-node db writer). bsub ships the
+                # submission environment to the compute node, so the prefix may wrap a bsub
+                # launcher. outdir_args templates are recorded on the row VERBATIM ("output={}")
+                # -- the formatted values aren't knowable before the row exists (run_id names
+                # the outdir), and the row's own outdir column completes them unambiguously.
+                argv = base_cmd if s.outdir_args is None else [*base_cmd, *s.outdir_args]
+                row = rundb.start_managed(s.job_key, stage_mode, argv=argv, inputs=input_ids)
+                # $SPEARMINT_INPUTS: the deps' resolved outdirs (requires order), so a fan-in
+                # worker reads r.inputs instead of taking N paths via its own argv.
+                inputs_env = (
+                    [f"SPEARMINT_INPUTS={os.pathsep.join(d.savedir for d in s.requires)}"]
+                    if s.requires else []
+                )
+                cmd = [
+                    "env",
+                    f"SPEARMINT_JOB_KEY={s.job_key}",
+                    f"SPEARMINT_MODE={stage_mode}",
+                    f"SPEARMINT_RUN_ROW={row.run_id}",
+                    f"SPEARMINT_RUN_OUTDIR={row.outdir}",
+                    *inputs_env,
+                    *base_cmd,
+                    *(a.format(row.outdir) for a in s.outdir_args or []),
+                ]
                 print(f"[run] {s.name}: {' '.join(cmd)}", flush=True)
                 running[pool.submit(_run_stage, cmd, row.run_id)] = (s, row.run_id)
             pending = still_pending
