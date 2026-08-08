@@ -25,9 +25,10 @@ workers = [
     e.Stage(f"w{i}", cmd=lambda: ["spearmint/examples/script.py"], cmd_prefix=lsf.cpu())
     for i in range(8)
 ]
+# No upstream argv: the join reads its deps' outdirs from r.inputs ($SPEARMINT_INPUTS).
 join = e.Stage(
     "join",
-    cmd=lambda: ["spearmint/examples/script.py", "--upstream", workers[0].savedir],
+    cmd=lambda: ["spearmint/examples/script.py"],
     req=list(workers),
     cmd_prefix=lsf.cpu(),
 )

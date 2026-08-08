@@ -31,7 +31,7 @@ import subprocess
 import sys
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -120,6 +120,11 @@ class Run:
     run_id: int
     outdir: str
     job_key: str
+    # Resolved outdirs of this run's dependency runs, in requires order -- populated for
+    # dagrunner-managed runs (the driver sets $SPEARMINT_INPUTS; see run()), so a fan-in worker
+    # reads its upstream dirs here instead of ferrying N paths through its own argv. A bare run
+    # has no dependency knowledge: [].
+    inputs: "list[str]" = field(default_factory=list)
 
 
 def _connect(readonly: bool = False) -> sqlite3.Connection:
@@ -466,7 +471,9 @@ def run(job_key: "str | None" = None, mode: "str | None" = None):
     Both args are optional: left unset, ``job_key`` and ``mode`` ("new"/"extend"/"replace", see
     ``_start``) are read from this process's $SPEARMINT_JOB_KEY/$SPEARMINT_MODE
     (``_job_key_from_env``/``_mode_from_env``) -- a caller wired up through dagrunner.py never
-    needs any spearmint plumbing of its own (see script.py).
+    needs any spearmint plumbing of its own (see script.py). A managed run also gets
+    ``r.inputs`` -- its dependencies' resolved outdirs, from $SPEARMINT_INPUTS (os.pathsep-
+    joined by the driver) -- so a fan-in worker needn't take N paths via argv.
 
     "extend" only hands the script back the SAME directory it wrote before -- whether the
     script actually reads existing state out of that directory and picks up where it left off,
@@ -480,7 +487,11 @@ def run(job_key: "str | None" = None, mode: "str | None" = None):
     managed = _managed_from_env()
     if managed is not None:
         run_id, outdir = managed
-        yield Run(run_id=run_id, outdir=outdir, job_key=job_key or _job_key_from_env())
+        raw = os.environ.get("SPEARMINT_INPUTS")
+        yield Run(
+            run_id=run_id, outdir=outdir, job_key=job_key or _job_key_from_env(),
+            inputs=raw.split(os.pathsep) if raw else [],
+        )
         return
     r = _start(job_key, mode)
     try:

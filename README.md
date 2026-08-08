@@ -76,8 +76,10 @@ variables, invisible to hydra/argparse/click parsing. So a worker adopts at one 
   `r.outdir`. Strict `parse_args()` and hydra apps are both fine — there are no spearmint flags
   to tolerate.
 
-See `spearmint/examples/` for runnable toy DAGs (no cluster needed — `python -m
-spearmint.examples.toy_dag_demo`) and a real-LSF smoke test (`examples/cluster_smoke.py`).
+See `spearmint/examples/` for runnable toy DAGs (no cluster needed): `toy_dag_demo.py` (a
+chain, upstream dirs passed via worker flags), `toy_fanout.py` (N loop-generated independent
+stages + a join that reads their dirs from `r.inputs` — the sweep shape), and a real-LSF smoke
+test (`cluster_smoke.py`).
 
 One constraint to know: only the driver process writes the ledger — stages it launches never
 touch the db (sqlite over a shared filesystem breaks under multi-node writes). Don't wrap your

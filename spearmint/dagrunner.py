@@ -11,6 +11,7 @@ from the stage's exit code -- compute nodes must never write the shared-filesyst
 see rundb.start_managed/finish_managed and rundb.run's managed branch).
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -418,12 +419,19 @@ def run_experiment(
                 # environment to the compute node, so the prefix may wrap a bsub launcher.
                 row = rundb.start_managed(s.job_key, stage_mode, argv=base_cmd, inputs=input_ids)
                 if s.outdir_args is None:
+                    # $SPEARMINT_INPUTS: the deps' resolved outdirs (requires order), so a
+                    # fan-in worker reads r.inputs instead of taking N paths via its own argv.
+                    inputs_env = (
+                        [f"SPEARMINT_INPUTS={os.pathsep.join(d.savedir for d in s.requires)}"]
+                        if s.requires else []
+                    )
                     cmd = [
                         "env",
                         f"SPEARMINT_JOB_KEY={s.job_key}",
                         f"SPEARMINT_MODE={stage_mode}",
                         f"SPEARMINT_RUN_ROW={row.run_id}",
                         f"SPEARMINT_RUN_OUTDIR={row.outdir}",
+                        *inputs_env,
                         *base_cmd,
                     ]
                 else:

@@ -25,7 +25,7 @@ from spearmint import rundb
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--upstream", default=None, help="an upstream stage's already-resolved outdir")
+    p.add_argument("--upstream", nargs="*", default=None, help="upstream stages' already-resolved outdirs")
     p.add_argument("--fail", action="store_true", help="raise after writing, to test abandon-on-failure")
     p.add_argument("--stage", help="stage name")
     args = p.parse_args()
@@ -35,7 +35,10 @@ def main() -> None:
         import time
 
         time.sleep(3)  # long enough to watch the DAG progress in the report/dashboard
-        text = f"upstream={args.upstream}\n" if args.upstream else "no upstream\n"
+        # Explicit --upstream wins; else r.inputs -- the deps' outdirs a managed run gets for
+        # free ($SPEARMINT_INPUTS), so a fan-in stage needs no argv plumbing (see toy_fanout.py).
+        upstreams = args.upstream if args.upstream is not None else r.inputs
+        text = "".join(f"upstream={u}\n" for u in upstreams) or "no upstream\n"
         (Path(r.outdir) / "result.txt").write_text(text)
         if args.fail:
             raise RuntimeError("--fail was passed")
