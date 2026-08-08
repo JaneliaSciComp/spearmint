@@ -99,6 +99,23 @@ ssh -N -L 8766:localhost:8766 login1.int.janelia.org   # then open http://127.0.
 
 ## Adopting spearmint in a new project
 
-1. Add the git dependency and run `uv sync` (in your cluster checkout too).
-2. Write experiment files that `import spearmint` and build `Experiment`/`Stage`s. If the
-   defaults don't fit (output location, LSF project/queues), set them once in a shared module.
+1. Add the git dependency to your `pyproject.toml` and `uv sync`. For cluster runs, do the same
+   in a checkout on the cluster — a real git clone with your changes committed or present as a
+   working-copy diff, since every run records provenance from that checkout's HEAD + diff.
+2. Write an experiment file that imports spearmint and builds `Experiment`/`Stage`s (start from
+   `spearmint/examples/toy_dag_demo.py`, or `experiments/spearmint/e00_flyem_mae_vs_lejepa.py`
+   in mia-muvit for a real ~16-stage DAG). Existing hydra/argparse workers need no changes —
+   give each stage `outdir_args` templates and the run dir is injected into the worker's own
+   flags.
+3. If the defaults don't fit, set them once in a shared module your experiment files import:
+   `CFG = spearmint.Config(root=...)` to relocate outputs (e.g. onto scratch), and/or the `lsf`
+   constants (`lsf.LSF_PROJECT = ...`) for a different LSF project or queues.
+4. Run it: `python my_exp.py` locally, or `lsf.submit_driver(...)` from the cluster checkout.
+   Watch with `spearmint status` / `spearmint browse` + the printed ssh tunnel.
+
+Things to know up front: only the driver process writes the ledger (don't wrap your own
+independently-`bsub`bed jobs in `spearmint.run()` from many nodes — see above); a stage is
+skipped iff its job_key has a `done` run, and nothing auto-invalidates on code or upstream
+changes — re-running after a change is an explicit `--new/--extend/--replace` forcing decision;
+and there are no config files or env vars to set — if something needs configuring, it's a
+Python value.
