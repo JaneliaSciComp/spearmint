@@ -126,6 +126,13 @@ class Experiment:
         self.config = config
         self.prefix = prefix
         self.cmd_prefix = list(cmd_prefix or [])
+        # A shell string pasted as one element (["uv run python"]) execs a program literally
+        # named "uv run python" -- caught here at build time, not as GNU env's cryptic ENOENT.
+        spaced = [c for c in self.cmd_prefix if any(ch.isspace() for ch in c)]
+        assert not spaced, (
+            f"cmd_prefix elements contain whitespace {spaced!r} -- pass one argv element per "
+            f"list item, e.g. ['uv', 'run', 'python']"
+        )
         self.stages: "list[Stage]" = []
 
     def Stage(
