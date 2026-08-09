@@ -54,17 +54,23 @@ from spearmint import lsf
 e = sp.Experiment(prefix="my_exp", cmd_prefix=["uv", "run", "python"])
 train = e.Stage("train", cmd=lambda: ["train.py"], cmd_prefix=lsf.gpu(walltime="8:00"))
 plot  = e.Stage("plot",  cmd=lambda: ["plot.py", "--in", train.savedir], req=[train], cmd_prefix=lsf.cpu())
-e.run()
+e.main()
 ```
 
-Running the file *is* running the experiment — locally it's just `python my_exp.py`. On the
-cluster, don't run it on the login node directly (long processes are forbidden there); submit it
-as the driver job, which then submits the per-stage `bsub -K` jobs from inside its own job:
+`e.main()` gives the file spearmint's standard flags: `--new/--extend/--replace STAGE` to force
+re-runs (cascading to dependents), and `--submit` to submit this same invocation as the
+long-lived driver job — which then submits the per-stage `bsub -K` jobs from inside its own
+job (long processes are forbidden on login nodes, so never run the file there without
+`--submit`). Locally, running the file *is* running the experiment:
 
 ```bash
-python -c "from spearmint import lsf; lsf.submit_driver('experiments/my_exp.py', 'smoke')"
-tail -f output_rundb/_lsf_logs/my_exp_smoke_driver.log
+python experiments/my_exp.py                    # laptop/workstation: run the DAG in-process
+python experiments/my_exp.py --submit           # login node: become a driver job instead
+tail -f output_rundb/_lsf_logs/my_exp_driver.log
 ```
+
+A file with its own args (a cost tier, say) parses them first and hands the rest to spearmint:
+`args, rest = parser.parse_known_args(); build(TIERS[args.tier]).main(rest)`.
 
 Workers never see spearmint in their argv — run identity travels as `SPEARMINT_*` environment
 variables, invisible to hydra/argparse/click parsing. So a worker adopts at one of two levels:
@@ -120,8 +126,8 @@ ssh -N -L 8766:localhost:8766 login1.int.janelia.org   # then open http://127.0.
 3. If the defaults don't fit, set them once in a shared module your experiment files import:
    `CFG = spearmint.Config(root=...)` to relocate outputs (e.g. onto scratch), and/or the `lsf`
    constants (`lsf.LSF_PROJECT = ...`) for a different LSF project or queues.
-4. Run it: `python my_exp.py` locally, or `lsf.submit_driver(...)` from the cluster checkout.
-   Watch with `spearmint status` / `spearmint browse` + the printed ssh tunnel.
+4. Run it: `python my_exp.py` locally, or `python my_exp.py --submit` from the cluster
+   checkout. Watch with `spearmint status` / `spearmint browse` + the printed ssh tunnel.
 
 Things to know up front: only the driver process writes the ledger (don't wrap your own
 independently-`bsub`bed jobs in `spearmint.run()` from many nodes — see above); a stage is

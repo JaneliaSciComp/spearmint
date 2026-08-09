@@ -7,10 +7,11 @@ plus a join stage whose provenance should record all eight input run_ids. The dr
 db integrity check, the join's recorded inputs, and the status report when the DAG finishes, so
 the driver log is the whole verdict.
 
-Run on the login node, from the repo root (a real checkout with spearmint installed, so
-provenance and ``import spearmint`` both resolve):
+Kick off on the login node, from the repo root (a real checkout with spearmint installed, so
+provenance and ``import spearmint`` both resolve) -- --submit makes this file submit ITSELF as
+the driver job:
 
-    python -c "from spearmint import lsf; lsf.submit_driver('spearmint/examples/cluster_smoke.py')"
+    uv run python spearmint/examples/cluster_smoke.py --submit
     tail -f output_rundb/_lsf_logs/cluster_smoke_driver.log
 """
 
@@ -34,7 +35,8 @@ join = e.Stage(
 )
 
 if __name__ == "__main__":
-    print(e.run())
+    if e.main() is None:  # --submit: the driver invocation (no --submit) runs the checks below
+        raise SystemExit(0)
     conn = sqlite3.connect(rundb._db_path())
     print("integrity_check:", conn.execute("PRAGMA integrity_check").fetchone()[0])
     print("join inputs:", conn.execute(

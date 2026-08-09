@@ -165,6 +165,52 @@ class Experiment:
     ) -> "dict[str, str]":
         return run_experiment(self.stages, new=new, extend=extend, replace=replace)
 
+    def main(self, argv: "list[str] | None" = None) -> "dict[str, str] | None":
+        """The standard experiment-file entrypoint -- spearmint's own flags, parsed explicitly
+        (never sniffed from a library call): ``--new/--extend/--replace STAGE`` (repeatable)
+        force stages by name (see run_experiment for what each mode means), and ``--submit``
+        submits this same invocation as the long-lived LSF driver job instead of running
+        in-process -- the driver re-runs sys.argv minus --submit, so the tier and force flags
+        ride along (and the DAG was already built by the time we submit, so definition errors
+        fail here on your terminal, not minutes later in a driver log). Returns run()'s status
+        dict, or None when it only submitted.
+
+        ``argv`` defaults to sys.argv[1:]; an experiment file with its own args (a tier, a
+        worker dispatch) parses them first and hands over the remainder:
+
+            args, rest = parser.parse_known_args()
+            build(TIERS[args.tier]).main(rest)
+
+        Anything unrecognized here is a usage error -- worker-only flags belong before the
+        parse_known_args split, not in ``argv``."""
+        import argparse
+
+        p = argparse.ArgumentParser(prog=f"{self.prefix} (spearmint stage flags)")
+        p.add_argument("--new", action="append", default=[], metavar="STAGE",
+                       help="force STAGE (+ its dependents) to re-run in a fresh dir")
+        p.add_argument("--extend", action="append", default=[], metavar="STAGE",
+                       help="force STAGE (+ its dependents) to resume its existing dir")
+        p.add_argument("--replace", action="append", default=[], metavar="STAGE",
+                       help="force STAGE (+ its dependents), clearing its existing dir first")
+        p.add_argument("--submit", action="store_true",
+                       help="submit this invocation as the LSF driver job (login node)")
+        a = p.parse_args(sys.argv[1:] if argv is None else argv)
+        if a.submit:
+            from . import lsf  # local-only experiments never need the LSF module
+
+            lsf.submit_driver(sys.argv[0], *(x for x in sys.argv[1:] if x != "--submit"))
+            return None
+        by_name = {s.name: s for s in self.stages}
+
+        def resolve(names: "list[str]") -> "list[Stage]":
+            unknown = [n for n in names if n not in by_name]
+            assert not unknown, f"unknown stage(s) {unknown}; choices: {', '.join(sorted(by_name))}"
+            return [by_name[n] for n in names]
+
+        status = self.run(new=resolve(a.new), extend=resolve(a.extend), replace=resolve(a.replace))
+        print(status)
+        return status
+
 
 def _reverse_edges(stages: "list[Stage]") -> "dict[Stage, list[Stage]]":
     """dependents[s] = local stages that directly require s."""

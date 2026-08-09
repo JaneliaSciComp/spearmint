@@ -6,8 +6,9 @@ no GPU, runs entirely locally. Demonstrates the two things phase 2 changes: job_
 skip-if-done (run this twice; the second time every stage skips), and downstream dependency-path
 resolution via an upstream Stage's own ``.savedir`` instead of a path fixed at build() time.
 
-    uv run python spearmint/examples/toy_dag_demo.py   # run it
-    uv run python spearmint/examples/toy_dag_demo.py   # run again -- everything skips
+    uv run python spearmint/examples/toy_dag_demo.py                 # run it
+    uv run python spearmint/examples/toy_dag_demo.py                 # run again -- everything skips
+    uv run python spearmint/examples/toy_dag_demo.py --replace mid   # force mid (+ leaf, its dependent)
 """
 
 import spearmint as O
@@ -28,4 +29,4 @@ leaf = e.Stage(
 
 
 if __name__ == "__main__":
-    print(e.run())
+    e.main()

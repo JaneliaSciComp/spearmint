@@ -27,4 +27,4 @@ workers = [e.Stage(f"w{i}", cmd=lambda i=i: [SCRIPT, f"--stage=w{i}"]) for i in 
 join = e.Stage("join", cmd=lambda: [SCRIPT, "--stage=join"], req=list(workers))
 
 if __name__ == "__main__":
-    print(e.run())
+    e.main()

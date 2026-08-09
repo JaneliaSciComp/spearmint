@@ -3,8 +3,8 @@ equivalent ``python -m spearmint <command> [args]``.
 
 The CLI is the viewing surface only -- a status table and a browser over run ledgers / results
 directories. Running experiments is a library affair: an experiment file imports spearmint,
-builds an Experiment/Stages, and is executed directly (locally) or submitted as an LSF driver
-job via lsf.submit_driver (see README + examples/).
+builds an Experiment/Stages, and ends in ``e.main()`` -- run it directly (locally) or with
+--submit to become an LSF driver job (see README + examples/).
 
 A thin dispatcher -- each command just re-runs the corresponding ``python -m spearmint.<module>``
 entrypoint (with argv rewritten), so every command keeps its OWN -h/--help and usage handling

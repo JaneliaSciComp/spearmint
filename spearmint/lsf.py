@@ -18,9 +18,14 @@ Usage in an experiment file:
 Kick off from the login node, from your repo root (a real checkout -- rundb reads provenance
 from its git HEAD). Long processes are forbidden on login nodes, so don't run the experiment
 file there directly -- submit it as the driver job (a 7-day CPU job on the `local` queue that
-submits the per-stage jobs from inside its own job) via submit_driver:
+submits the per-stage jobs from inside its own job). An experiment file ending in ``e.main()``
+does this itself via its --submit flag (Experiment.main calls submit_driver on sys.argv):
 
-    python -c "from spearmint import lsf; lsf.submit_driver('experiments/my_exp.py', 'smoke')"
+    uv run python experiments/my_exp.py smoke --submit
+
+submit_driver is also plain-callable, and is nothing bsub can't do by hand -- it just encodes
+the flags worth not retyping (-W 168:00 so the queue's default runtime limit doesn't kill the
+driver mid-experiment, the -oo log under _lsf_logs, a job name carrying the args).
 """
 
 import subprocess
