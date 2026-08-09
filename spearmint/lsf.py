@@ -50,7 +50,7 @@ def _log_dir() -> str:
     return f"{rundb.root()}/_lsf_logs"
 
 
-def _prefix(job_key: str, queue: str, walltime: str, slots: int, gpu: bool) -> "list[str]":
+def _prefix(job_key: str, queue: str, walltime: str, slots: int, gpus: int) -> "list[str]":
     log_dir = _log_dir()
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     name = job_key.replace("/", "_")
@@ -62,23 +62,25 @@ def _prefix(job_key: str, queue: str, walltime: str, slots: int, gpu: bool) -> "
         "-W", walltime,
         "-n", str(slots),
         "-R", "span[hosts=1]",
-        *(["-gpu", "num=1:mode=exclusive_process"] if gpu else []),
+        *(["-gpu", f"num={gpus}:mode=exclusive_process"] if gpus else []),
         "-oo", f"{log_dir}/{name}.log",
         "uv", "run", "python",
     ]
 
 
-def gpu(queue: "str | None" = None, walltime: str = "4:00", slots: "int | None" = None) -> "Callable[[str], list[str]]":
-    """Stage cmd_prefix for a single-GPU LSF job (queue/slots default to GPU_QUEUE/GPU_SLOTS)."""
+def gpu(queue: "str | None" = None, walltime: str = "4:00", slots: "int | None" = None, gpus: int = 1) -> "Callable[[str], list[str]]":
+    """Stage cmd_prefix for a GPU LSF job (queue defaults to GPU_QUEUE, slots to GPU_SLOTS per
+    GPU). ``gpus>1`` puts them all on one host (span[hosts=1]) -- single-node DDP territory;
+    the worker still has to opt into using them (e.g. Lightning strategy=ddp)."""
     queue = queue or GPU_QUEUE
-    slots = GPU_SLOTS if slots is None else slots
-    return lambda job_key: _prefix(job_key, queue, walltime, slots, gpu=True)
+    slots = GPU_SLOTS * gpus if slots is None else slots
+    return lambda job_key: _prefix(job_key, queue, walltime, slots, gpus=gpus)
 
 
 def cpu(queue: "str | None" = None, walltime: str = "1:00", slots: int = 1) -> "Callable[[str], list[str]]":
     """Stage cmd_prefix for a small CPU-only LSF job (queue defaults to CPU_QUEUE)."""
     queue = queue or CPU_QUEUE
-    return lambda job_key: _prefix(job_key, queue, walltime, slots, gpu=False)
+    return lambda job_key: _prefix(job_key, queue, walltime, slots, gpus=0)
 
 
 def submit_driver(experiment_file: str, *args: str) -> str:
