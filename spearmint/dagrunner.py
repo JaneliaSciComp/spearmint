@@ -193,12 +193,14 @@ class Experiment:
         import argparse
 
         p = argparse.ArgumentParser(prog=f"{self.prefix} (spearmint stage flags)")
-        p.add_argument("--new", action="append", default=[], metavar="STAGE",
-                       help="force STAGE (+ its dependents) to re-run in a fresh dir")
-        p.add_argument("--extend", action="append", default=[], metavar="STAGE",
-                       help="force STAGE (+ its dependents) to resume its existing dir")
-        p.add_argument("--replace", action="append", default=[], metavar="STAGE",
-                       help="force STAGE (+ its dependents), clearing its existing dir first")
+        # nargs="+" + extend: several names per flag (--new w1 w2), still repeatable. Each name
+        # may be a glob over stage names (--new 'w*'), for loop-generated stages.
+        p.add_argument("--new", action="extend", nargs="+", default=[], metavar="STAGE",
+                       help="force STAGE(s) (+ dependents) to re-run in a fresh dir; globs ok")
+        p.add_argument("--extend", action="extend", nargs="+", default=[], metavar="STAGE",
+                       help="force STAGE(s) (+ dependents) to resume the existing dir; globs ok")
+        p.add_argument("--replace", action="extend", nargs="+", default=[], metavar="STAGE",
+                       help="force STAGE(s) (+ dependents), clearing the existing dir first; globs ok")
         p.add_argument("--submit", action="store_true",
                        help="submit this invocation as the LSF driver job (login node)")
         a = p.parse_args(sys.argv[1:] if argv is None else argv)
@@ -210,9 +212,21 @@ class Experiment:
         by_name = {s.name: s for s in self.stages}
 
         def resolve(names: "list[str]") -> "list[Stage]":
-            unknown = [n for n in names if n not in by_name]
-            assert not unknown, f"unknown stage(s) {unknown}; choices: {', '.join(sorted(by_name))}"
-            return [by_name[n] for n in names]
+            """Names -> Stages: exact match, else a glob over stage names (its expansion is
+            printed -- forcing is destructive enough to deserve an echo). Deduped, order kept;
+            a stage landing in two different mode buckets still trips run_experiment's assert."""
+            from fnmatch import fnmatch
+
+            out: "list[Stage]" = []
+            for n in names:
+                if n in by_name:
+                    hits = [by_name[n]]
+                else:
+                    hits = [by_name[k] for k in sorted(by_name) if fnmatch(k, n)]
+                    assert hits, f"no stage matches {n!r}; choices: {', '.join(sorted(by_name))}"
+                    print(f"[force] {n!r} -> {[s.name for s in hits]}", flush=True)
+                out += [s for s in hits if s not in out]
+            return out
 
         status = self.run(new=resolve(a.new), extend=resolve(a.extend), replace=resolve(a.replace))
         print(status)
