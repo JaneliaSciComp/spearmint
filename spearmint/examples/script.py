@@ -33,23 +33,27 @@ def main() -> None:
     args = p.parse_args()
 
     with rundb.run() as r:
-        print(f"[{r.job_key}] run_id={r.run_id} writing to {r.outdir}")
+        print(f"[{r.job_key}] run_id={r.run_id} writing to {r.outdir}", flush=True)  # stdout is a pipe -> block-buffered
         import time
 
-        time.sleep(3)  # long enough to watch the DAG progress in the report/dashboard
         # Explicit --upstream wins; else r.inputs -- the deps' outdirs a managed run gets for
         # free ($SPEARMINT_INPUTS), so a fan-in stage needs no argv plumbing (see toy_fanout.py).
         upstreams = args.upstream if args.upstream is not None else r.inputs
         text = "".join(f"upstream={u}\n" for u in upstreams) or "no upstream\n"
         (Path(r.outdir) / "result.txt").write_text(text)
-        # Fake training curves + a scalar summary, deterministic per job_key -- gives the
-        # report demo (toy_report_demo.py) something to plot and pivot.
+        # Fake training curves, deterministic per job_key, STREAMED a row per 0.5s (one full
+        # flushed line each) like a real training loop -- so live viewers (the report's tick
+        # re-renders, a reloaded run page) watch the curves grow. ~10s per stage.
         rng = random.Random(r.job_key)
         base = rng.uniform(1.0, 2.0)
-        rows = [{"step": i, "loss": base * 0.90**i + rng.uniform(0, 0.02),
-                 "val_loss": base * 0.92**i + rng.uniform(0, 0.05)} for i in range(20)]
+        rows = []
         with open(Path(r.outdir) / "metrics.jsonl", "w") as f:
-            f.writelines(json.dumps(row) + "\n" for row in rows)
+            for i in range(20):
+                rows.append({"step": i, "loss": base * 0.90**i + rng.uniform(0, 0.02),
+                             "val_loss": base * 0.92**i + rng.uniform(0, 0.05)})
+                f.write(json.dumps(rows[-1]) + "\n")
+                f.flush()
+                time.sleep(1)
         (Path(r.outdir) / "summary.json").write_text(json.dumps(
             {"final_loss": rows[-1]["loss"],
              "best_val_loss": min(row["val_loss"] for row in rows), "n_steps": len(rows)}

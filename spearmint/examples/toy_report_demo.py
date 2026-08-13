@@ -17,6 +17,10 @@ from spearmint import viz
 
 SCRIPT = "spearmint/examples/script.py"
 
+# Toy stages stream metrics for only ~10s; tick fast enough that the report visibly grows
+# mid-stage. Real experiments keep the 120s default.
+O.dagrunner.REPORT_TICK_SECONDS = 0.5
+
 e = O.Experiment(prefix="e05_report", cmd_prefix=["uv", "run", "python"])
 train_a = e.Stage("train_a", cmd=lambda: [SCRIPT, "--stage=a"])
 train_b = e.Stage("train_b", cmd=lambda: [SCRIPT, "--stage=b"])
@@ -27,18 +31,27 @@ def make_report(savedir) -> str:
     finals: "dict[str, dict]" = {}
     missing = []
     for stage in (train_a, train_b):
-        d = savedir(stage)
-        if d is None:
+        # Curves from the LIVE dir (wip included -- python-native means one rundb call away),
+        # so mid-run renders show them growing; summaries only from a completed run.
+        live = O.rundb.latest_outdir(stage.job_key)
+        metrics = Path(live or "") / "metrics.jsonl"
+        if live is not None and metrics.exists():
+            curves[stage.name] = [json.loads(ln) for ln in metrics.read_text().splitlines()]
+        # exists()-guard even though savedir() says done: a REPLACE re-run clears the last
+        # done outdir in place, so 'latest done' files can vanish mid-run. Reports render
+        # whatever half-state exists right now -- guard every read.
+        done = savedir(stage)
+        summary = Path(done or "") / "summary.json"
+        if done is not None and summary.exists():
+            finals[stage.name] = json.loads(summary.read_text())
+        else:
             missing.append(stage.name)
-            continue
-        curves[stage.name] = [json.loads(ln) for ln in (Path(d) / "metrics.jsonl").read_text().splitlines()]
-        finals[stage.name] = json.loads((Path(d) / "summary.json").read_text())
     return viz.page(
-        viz.note(f"waiting on: {', '.join(missing)}") if missing else "",
+        viz.note(f"still running: {', '.join(missing)}") if missing else "",
         viz.lines(curves, x="step", y=["loss", "val_*"], dash={"val_*": "dash"}, logy=True,
                   title="loss, A vs B (val dashed)"),
         viz.table(finals, title="final metrics"),
-        title="e05_report", refresh=60,
+        title="e05_report", refresh=1,
     )
 
 
