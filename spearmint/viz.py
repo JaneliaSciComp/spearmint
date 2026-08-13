@@ -261,7 +261,9 @@ def page(*sections: str, title: str = "report", refresh: "int | None" = None) ->
     """A self-contained HTML document wrapping ``sections`` (fragments from lines/table/images
     or any HTML string of your own): dark shell, Plotly CDN, the image lightbox. ``refresh``
     adds a meta-refresh (seconds) -- with the driver re-rendering as stages finish, an open
-    tab then tracks the run with zero server machinery."""
+    tab then tracks the run with zero server machinery. Pass it CONDITIONALLY
+    (``refresh=5 if missing else None``): the run's final render then emits a refresh-free
+    page and the tab stops reloading once everything is done."""
     meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
     body = "".join(sections)
     return (f'<!doctype html><html><head><meta charset="utf-8">{meta}'

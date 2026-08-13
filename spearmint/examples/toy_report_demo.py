@@ -51,7 +51,11 @@ def make_report(savedir) -> str:
         viz.lines(curves, x="step", y=["loss", "val_*"], dash={"val_*": "dash"}, logy=True,
                   title="loss, A vs B (val dashed)"),
         viz.table(finals, title="final metrics"),
-        title="e05_report", refresh=1,
+        title="e05_report",
+        # Refresh only while incomplete: the driver's FINAL render emits a refresh-free page,
+        # so an open tab's last tick loads it and stops reloading (reload by hand to re-arm
+        # after kicking a new run).
+        refresh=1 if missing else None,
     )
 
 
