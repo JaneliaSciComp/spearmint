@@ -115,6 +115,11 @@ def _db_path() -> str:
     return f"{root()}/rundb.db"
 
 
+# Experiment reports live at ROOT/_reports/<prefix>/report.html (prefix "/"s are real
+# subdirs) -- written by the driver (dagrunner Experiment.report), linked by the dashboard.
+REPORTS_DIR = "_reports"
+
+
 @dataclass
 class Run:
     run_id: int

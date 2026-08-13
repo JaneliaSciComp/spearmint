@@ -20,12 +20,12 @@ from urllib.parse import quote
 
 # file extension -> content kind. .jsonl/.csv are "table" (row-oriented -> table + plot); a
 # .json is "json" (folding tree) unless it's an array of records (peeked below), which renders
-# as a table too.
-_EXT_KIND = {".png": "png", ".jsonl": "table", ".csv": "table", ".json": "json"}
+# as a table too; .html is a ready-made page (e.g. a viz-built report) -- linked, not inlined.
+_EXT_KIND = {".png": "png", ".jsonl": "table", ".csv": "table", ".json": "json", ".html": "html"}
 
 # content kind -> the marker glyph shown after a dir/stage name; an entry may have several.
 # "log" only occurs via the dashboard (a failed stage's LSF err log).
-CONTENT_SYMBOLS = {"png": "🖼", "table": "📊", "json": "{}", "log": "⚠"}
+CONTENT_SYMBOLS = {"html": "📈", "png": "🖼", "table": "📊", "json": "{}", "log": "⚠"}
 
 _LISTING_CAP = 500  # rows on a listing page
 
@@ -412,6 +412,15 @@ def render_dir(outdir: str, base: str) -> str:
     def rel(p: Path) -> str:
         return str(p.resolve().relative_to(base_path))
 
+    parts_top: "list[str]" = []
+    # Ready-made pages first (a viz-built report.html deserves top billing) -- linked, not
+    # inlined: they're self-contained documents, best opened as their own tab.
+    htmls = walk("*.html")
+    if htmls:
+        parts_top.append("<p>" + " · ".join(
+            f'📈 <a href="/file/{quote(rel(p))}">{html.escape(rel(p))}</a>' for p in htmls[:20]
+        ) + "</p>")
+
     # First split content: tables (jsonl/csv + array-of-records json) vs general JSON trees.
     tables: "list[tuple[str, list[str], list[dict]]]" = []  # (label, cols, rows)
     trees: "list[tuple[str, object]]" = []  # (label, parsed json)
@@ -450,7 +459,7 @@ def render_dir(outdir: str, base: str) -> str:
     zarrs = sorted({rel(p) for p in root.rglob("*.zarr")})
     if zarrs:
         parts.append("<p class='note'>zarr volumes (not rendered): " + ", ".join(html.escape(z) for z in zarrs) + "</p>")
-    return "".join(parts) or "<p class='note'>no renderable files in this directory</p>"
+    return "".join(parts_top + parts) or "<p class='note'>no renderable files in this directory</p>"
 
 
 class Server(http.server.ThreadingHTTPServer):

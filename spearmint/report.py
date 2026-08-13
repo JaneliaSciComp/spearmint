@@ -105,23 +105,41 @@ def lsf_log_relpath(job_key: str) -> str:
     return f"_lsf_logs/{job_key.replace('/', '_')}.log"
 
 
-def render_html(groups: "dict[str, list[JobRow]]", kinds: "dict[str, set[str]] | None" = None) -> str:
+def render_html(
+    groups: "dict[str, list[JobRow]]",
+    kinds: "dict[str, set[str]] | None" = None,
+    reports: "set[str] | None" = None,
+) -> str:
     """The status table as an HTML fragment (no <html>/<head> shell -- dashboard.py wraps it,
     and swaps just this fragment in on each refresh). Pure formatter over collect()'s data, the
-    HTML sibling of render(). Each stage links to its component-B run report (/run/<job_key>);
-    a failed stage's badge links to its err log (/file/<lsf log>) -- both dashboard.py routes.
-    ``kinds`` maps job_key -> the set of content kinds its run page holds (png/table/json/log,
-    resolved by dashboard._content_kinds); each gets a trailing glyph
-    (explorer.CONTENT_SYMBOLS) so you can see at a glance what's there."""
+    HTML sibling of render(). Each stage links to its run page (/run/<job_key>); a failed
+    stage's badge links to its err log (/file/<lsf log>) -- both dashboard.py routes. ``kinds``
+    maps job_key -> the set of content kinds its run page holds (png/table/json/log, resolved
+    by dashboard._content_kinds); each gets a trailing glyph (explorer.CONTENT_SYMBOLS).
+    ``reports`` holds experiment prefixes with a driver-rendered report.html under
+    ROOT/_reports (may be multi-segment, e.g. "e00/smoke"): a group row links its own report
+    and any nested under it."""
     import html
     from urllib.parse import quote
 
     from .explorer import CONTENT_SYMBOLS
 
     kinds = kinds or {}
+    reports = reports or set()
     rows = []
+
+    def report_link(prefix: str, text: str) -> str:
+        return f'<a href="/file/{quote(f"_reports/{prefix}/report.html")}">{html.escape(text)}</a>'
+
     for group in sorted(groups):
-        rows.append(f'<tr class="group"><td colspan="6">{html.escape(group)}</td></tr>')
+        head = html.escape(group)
+        if group in reports:
+            head = report_link(group, f"{group} 📈")
+        head += "".join(
+            f' <span class="mark">{report_link(r, "📈" + r.split("/", 1)[1])}</span>'
+            for r in sorted(reports) if r.startswith(f"{group}/")
+        )
+        rows.append(f'<tr class="group"><td colspan="6">{head}</td></tr>')
         for r in sorted(groups[group], key=lambda r: r.job_key):
             stale = "?" if r.stale is None else (", ".join(r.stale) or "–")
             total = str(r.total).split(".")[0]

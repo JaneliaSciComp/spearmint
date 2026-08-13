@@ -18,6 +18,8 @@ _mode_from_env), so this parser only declares its own actual flags.
 """
 
 import argparse
+import json
+import random
 from pathlib import Path
 
 from spearmint import rundb
@@ -40,6 +42,18 @@ def main() -> None:
         upstreams = args.upstream if args.upstream is not None else r.inputs
         text = "".join(f"upstream={u}\n" for u in upstreams) or "no upstream\n"
         (Path(r.outdir) / "result.txt").write_text(text)
+        # Fake training curves + a scalar summary, deterministic per job_key -- gives the
+        # report demo (toy_report_demo.py) something to plot and pivot.
+        rng = random.Random(r.job_key)
+        base = rng.uniform(1.0, 2.0)
+        rows = [{"step": i, "loss": base * 0.90**i + rng.uniform(0, 0.02),
+                 "val_loss": base * 0.92**i + rng.uniform(0, 0.05)} for i in range(20)]
+        with open(Path(r.outdir) / "metrics.jsonl", "w") as f:
+            f.writelines(json.dumps(row) + "\n" for row in rows)
+        (Path(r.outdir) / "summary.json").write_text(json.dumps(
+            {"final_loss": rows[-1]["loss"],
+             "best_val_loss": min(row["val_loss"] for row in rows), "n_steps": len(rows)}
+        ))
         if args.fail:
             raise RuntimeError("--fail was passed")
 

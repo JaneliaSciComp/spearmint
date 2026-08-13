@@ -26,6 +26,11 @@ from . import rundb
 # slot frees, so [run] lines are only ever printed for stages actually executing.
 MAX_PARALLEL = 32
 
+# How often the scheduler re-renders an Experiment's report while stages are RUNNING (see
+# Experiment.report) -- frequent enough that mid-stage curves (a growing metrics.jsonl) stay
+# fresh, rare enough that rendering cost is noise. Finalizes re-render immediately regardless.
+REPORT_TICK_SECONDS = 120
+
 # job_key -> the one Stage object allowed to have claimed it, this process's lifetime. Catches
 # an accidental prefix/name collision (two *different* Stage objects landing on the same
 # job_key) loudly at definition time, rather than silently letting one experiment's scheduler
@@ -134,6 +139,13 @@ class Experiment:
             f"list item, e.g. ['uv', 'run', 'python']"
         )
         self.stages: "list[Stage]" = []
+        # Optional report renderer: a plain function ``fn(savedir) -> html`` (build it with
+        # spearmint.viz; ``savedir`` is self.savedir below, so partial runs render too). The
+        # scheduler re-runs it after every stage finalize, every REPORT_TICK_SECONDS while
+        # anything is running, and once at DAG end, writing ROOT/_reports/<prefix>/report.html
+        # (linked from the status table). A raising report renders as a printed error -- it
+        # can never fail or delay a stage.
+        self.report: "Callable[[Callable], str] | None" = None
 
     def Stage(
         self,
@@ -170,7 +182,23 @@ class Experiment:
         extend: "list[Stage] | None" = None,
         replace: "list[Stage] | None" = None,
     ) -> "dict[str, str]":
-        return run_experiment(self.stages, new=new, extend=extend, replace=replace)
+        return run_experiment(self.stages, new=new, extend=extend, replace=replace,
+                              on_update=self._render_report if self.report else None)
+
+    def savedir(self, stage: "Stage | str") -> "str | None":
+        """A stage's latest DONE outdir (by object or name), or None -- what a report fn keys
+        on, so a partially-complete run still renders its finished parts (contrast
+        Stage.savedir, which asserts when unresolved: right for commands, wrong for reports).
+        Reads the ledger, so it also sees runs from before this pass."""
+        s = stage if isinstance(stage, Stage) else next((t for t in self.stages if t.name == stage), None)
+        assert s is not None, f"no stage named {stage!r} in experiment {self.prefix!r}"
+        return rundb.latest_outdir(s.job_key, status="done")
+
+    def _render_report(self) -> None:
+        assert self.report is not None
+        out = Path(rundb.root()) / rundb.REPORTS_DIR / self.prefix
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.html").write_text(self.report(self.savedir))
 
     def main(self, argv: "list[str] | None" = None) -> "dict[str, str] | None":
         """The standard experiment-file entrypoint -- spearmint's own flags, parsed explicitly
@@ -352,6 +380,7 @@ def run_experiment(
     new: "list[Stage] | None" = None,
     extend: "list[Stage] | None" = None,
     replace: "list[Stage] | None" = None,
+    on_update: "Callable[[], None] | None" = None,
 ) -> "dict[str, str]":
     """Run every stage, independent stages CONCURRENTLY: a stage launches (as a local
     subprocess) as soon as every local require of it is finalized, and the scheduler then blocks
@@ -439,6 +468,17 @@ def run_experiment(
         if st == "done":
             s._savedir = rundb.latest_outdir(s.job_key, status="done")
 
+    def update() -> None:
+        """Re-render the experiment's report (Experiment.report -> on_update). Presentation
+        must never endanger the run: a raising report prints and the DAG carries on."""
+        if on_update is None:
+            return
+        try:
+            on_update()
+        except Exception as e:  # noqa: BLE001 -- see docstring
+            print(f"[report] render failed: {e!r}", flush=True)
+
+    update()  # initial render, so the report exists (all-waiting) from the first second
     with futures.ThreadPoolExecutor(max_workers=max(1, min(MAX_PARALLEL, len(stages)))) as pool:
         while pending or running:
             # Launch pass: pending is in topo order, so a stage finalized here (abandoned or
@@ -515,12 +555,17 @@ def run_experiment(
             if not running:
                 assert not pending, f"scheduler stuck with pending stages {[s.name for s in pending]}"
                 break
-            # Block -- no polling -- until at least one child exits, then finalize it.
-            done_futs, _ = futures.wait(running, return_when=futures.FIRST_COMPLETED)
+            # Block until at least one child exits, then finalize it. With a report to keep
+            # fresh, wake on a timer too (mid-stage data -- a growing metrics.jsonl -- changes
+            # with no finalize to piggyback on); an empty done_futs is just a tick.
+            done_futs, _ = futures.wait(running, return_when=futures.FIRST_COMPLETED,
+                                        timeout=REPORT_TICK_SECONDS if on_update else None)
             for fut in done_futs:
                 s, run_id = running.pop(fut)
                 ok = fut.result() == 0
                 rundb.finish_managed(run_id, ok)
                 finalize(s, "done" if ok else "failed")
                 print(f"  [{s.name}] {'ok' if ok else 'FAILED'}", flush=True)
+            update()  # finalize batch, or a bare tick -- either way the report re-renders
+    update()  # final render: every stage finalized (skips/abandons included)
     return status

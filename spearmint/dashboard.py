@@ -78,11 +78,20 @@ def _content_kinds(job_key: str, status: str) -> "set[str]":
     return kinds
 
 
+def _reports() -> "set[str]":
+    """Experiment prefixes with a driver-rendered ROOT/_reports/<prefix>/report.html
+    (prefixes may contain '/'), for linking from the status table's group rows."""
+    rdir = Path(rundb.root()) / rundb.REPORTS_DIR
+    if not rdir.is_dir():
+        return set()
+    return {str(p.parent.relative_to(rdir)) for p in rdir.rglob("report.html")}
+
+
 def _table() -> str:
     groups = report.collect()
     kinds = {r.job_key: _content_kinds(r.job_key, r.status) for rows in groups.values() for r in rows}
     kinds = {k: v for k, v in kinds.items() if v}  # only stages that actually have something
-    return report.render_html(groups, kinds=kinds)
+    return report.render_html(groups, kinds=kinds, reports=_reports())
 
 
 def _run_page(job_key: str) -> str:

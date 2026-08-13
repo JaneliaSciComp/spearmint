@@ -92,6 +92,29 @@ touch the db (sqlite over a shared filesystem breaks under multi-node writes). D
 own independently-`bsub`bed jobs in `spearmint.run()` from many nodes at once; go through the
 scheduler, or keep bare runs on a single machine.
 
+### Experiment reports (Python, live)
+
+A report is a plain function composed with `spearmint.viz` — load and munge whatever you like
+with the whole language, tolerate not-yet-done stages, return HTML:
+
+```python
+def make_report(savedir):                    # savedir(stage) -> latest done outdir, or None
+    curves = {s.name: load_jsonl(f"{savedir(s)}/metrics.jsonl") for s in (train_a, train_b) if savedir(s)}
+    return viz.page(
+        viz.lines(curves, x="step", y=["loss", "val_*"], dash={"val_*": "dash"}, logy=True),
+        viz.table({"A": summary_a, "B": summary_b}),           # metric rows × columns
+        viz.images(slices_dir, rows=["raw", "gt", "pred"], cols=[10250, 10500]),
+        title="my_exp", refresh=60,
+    )
+e.report = make_report
+```
+
+The driver re-renders it after every stage finishes, every ~2 minutes while anything runs, and
+once at the end — `ROOT/_reports/<prefix>/report.html`, linked from the status table, fresh
+through a long run (with `refresh=`, an open tab tracks it). A raising report prints an error
+and never delays a stage. Heavy rendering (slice PNGs etc.) belongs in a normal stage; the
+report just embeds the results. See `spearmint/examples/toy_report_demo.py`.
+
 ## Watch runs + browse results (CLI)
 
 ```bash
