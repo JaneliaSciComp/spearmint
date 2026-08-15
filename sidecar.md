@@ -1,10 +1,14 @@
 
 # Sidecars: processes coupled to concurrent stage execution
 
-> STATUS: the "Design (settled)" below is ONE candidate — the sidecar bolt-on to the existing
-> DAG scheduler. See "Is the DAG the right substrate?" at the bottom for the competing
-> concurrency models (full async, CSP, TCP orchestrator, message queues) and the synthesis.
-> Direction not yet decided.
+> STATUS: **DECIDED — aio adopted as the base.** The sidecar bolt-on below was never built;
+> it survives as the record of what the async model replaced. dagrunner's Experiment/Stage
+> API is now an AOT plan layer compiled onto aio.Ctx.submit (thread scheduler deleted;
+> ordering/skip/force-cascade/failure-propagation/MAX_PARALLEL all live in aio). Final sizes:
+> aio core 346 lines, dagrunner 432 (from 571; ~130 of it is the declarative surface +
+> validation, ~110 the plan lowering). Lifecycle coupling is example code
+> (toy_aio_sidecar.py), including the freshness-without-wait coupling a re-run needs:
+> ``force=None if train.skipped else "new"``.
 
 ## Context
 

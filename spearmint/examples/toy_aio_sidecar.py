@@ -23,7 +23,11 @@ WATCHER = "spearmint/examples/watcher.py"
 
 async def main(ctx: aio.Ctx) -> None:
     train = ctx.submit("train", [SCRIPT, "--stage=a"])
-    val = ctx.submit("val", [WATCHER, "--watch", train.outdir])
+    # Freshness-coupled WITHOUT wait-coupling: deps= would make val wait for train, which is
+    # exactly wrong -- instead its skip decision mirrors train's (train skipped -> val may
+    # skip too; train running -> val must run alongside).
+    val = ctx.submit("val", [WATCHER, "--watch", train.outdir],
+                     force=None if train.skipped else "new")
     try:
         await train
     finally:

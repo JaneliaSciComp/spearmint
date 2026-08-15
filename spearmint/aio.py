@@ -45,7 +45,12 @@ _STARTED_RE = re.compile(r"<<Starting on (\S+?)>>")
 
 class JobFailed(RuntimeError):
     """Awaiting a Job whose process exited nonzero (or whose dependency did) raises this --
-    failure propagation is ordinary exception propagation."""
+    failure propagation is ordinary exception propagation. ``job_key`` names the ORIGIN of
+    the failure, so a catcher (or the DAG layer) can tell "I failed" from "my dep failed"."""
+
+    def __init__(self, job_key: str, detail: str):
+        super().__init__(f"{job_key}: {detail}")
+        self.job_key = job_key
 
 
 def _signal(proc, jobid: "str | None") -> None:
@@ -71,8 +76,17 @@ class Job:
         self.job_key = job_key
         self._ctx = ctx
         self.ran = False           # actually launched this session (skips stay False)
-        self._mode = "new"         # resolved in Ctx.submit
-        self._argv: "list[str]" = []  # recorded command, resolved in Ctx.submit
+        self.skipped = False       # memoized against the ledger; for a dep-free job this is
+        #                            already knowable at submit -- how a lifecycle-coupled
+        #                            companion decides its own freshness (see toy_aio_sidecar)
+        self._mode = "new"         # resolved at submit (dep-free) or launch (dep-carrying)
+        # The command spec, resolved lazily: _cmd may be a callable (evaluated only after deps
+        # are done, so it can reference their savedirs -- the Stage-lambda pattern).
+        self._prefix: "list[str]" = []
+        self._cmd = None
+        self._outdir_args: "list[str] | None" = None
+        self._base_cmd: "list[str]" = []
+        self._argv: "list[str]" = []  # what the ledger records
         self._row: "rundb.Run | None" = None
         self._proc = None
         self._jobid: "str | None" = None
@@ -123,7 +137,32 @@ class Job:
             self._closed = True
             rundb.finish_managed(self._row.run_id, ok)
 
-    async def _run(self, deps: "tuple[Job, ...]", make_cmd, forced: "str | None") -> str:
+    def _resolve_spec(self) -> None:
+        """Evaluate the (possibly callable) command now -- deps are done, their savedirs
+        referenceable -- and fix the ledger argv (outdir_args recorded verbatim; the row's
+        outdir column completes them)."""
+        c = self._cmd() if callable(self._cmd) else self._cmd
+        self._base_cmd = [*self._prefix, *list(c)]
+        self._argv = self._base_cmd if self._outdir_args is None else [*self._base_cmd, *self._outdir_args]
+
+    def _final_cmd(self, deps: "tuple[Job, ...]") -> "list[str]":
+        row = self._row
+        assert row is not None
+        inputs_env = (
+            [f"SPEARMINT_INPUTS={os.pathsep.join(d._row.outdir for d in deps)}"] if deps else []
+        )
+        return [
+            "env",
+            f"SPEARMINT_JOB_KEY={self.job_key}",
+            f"SPEARMINT_MODE={self._mode}",
+            f"SPEARMINT_RUN_ROW={row.run_id}",
+            f"SPEARMINT_RUN_OUTDIR={row.outdir}",
+            *inputs_env,
+            *self._base_cmd,
+            *(a.format(row.outdir) for a in self._outdir_args or []),
+        ]
+
+    async def _run(self, deps: "tuple[Job, ...]", forced: "str | None") -> str:
         if deps:
             await asyncio.gather(*deps)  # a failed dep raises JobFailed here -> we cascade
             # The skip/mode decision for dep-carrying jobs happens HERE, not at submit --
@@ -132,35 +171,38 @@ class Job:
             dep_ran = any(d.ran for d in deps)
             if forced is None and not dep_ran and rundb.is_done(self.job_key):
                 self._row = _done_row(self.job_key)
-                print(f"[skip] {self.name}: already done ({self.job_key})", flush=True)
+                self.skipped = True
+                _skip_print(self.name, self.job_key)
                 return self._row.outdir
             self._mode = forced or ("new" if dep_ran else "replace")
         if self._stopping and self._row is None:
-            raise JobFailed(f"{self.job_key} cancelled before start")
+            raise JobFailed(self.job_key, "cancelled before start")
         if self._row is None:  # dep-free submits inserted their row synchronously in submit()
+            self._resolve_spec()
             self._ctx._insert_row(self, deps)
-        cmd = make_cmd(self._row)
-        print(f"[run] {self.name}: {' '.join(cmd)}", flush=True)
-        self.ran = True
-        try:
-            self._proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
-            )
-            assert self._proc.stdout is not None
-            async for raw in self._proc.stdout:
-                line = raw.decode(errors="replace")
-                print(line, end="", flush=True)
-                if (m := _JOBID_RE.match(line)) is not None:
-                    self._jobid = m.group(1)
-                    rundb.set_lsf_jobid(self._row.run_id, self._jobid)
-                if (m := _STARTED_RE.match(line)) is not None:
-                    rundb.set_lsf_state(self._row.run_id, f"RUN {m.group(1)}")
-            rc = await self._proc.wait()
-        except asyncio.CancelledError:  # loop teardown (e.g. ctrl-c), NOT job.cancel()
-            if self._proc is not None and self._proc.returncode is None:
-                _signal(self._proc, self._jobid)
-            self._close(ok=False)
-            raise
+        cmd = self._final_cmd(deps)
+        async with self._ctx._sem:  # cap concurrent child processes (Ctx max_parallel)
+            print(f"[run] {self.name}: {' '.join(cmd)}", flush=True)
+            self.ran = True
+            try:
+                self._proc = await asyncio.create_subprocess_exec(
+                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+                )
+                assert self._proc.stdout is not None
+                async for raw in self._proc.stdout:
+                    line = raw.decode(errors="replace")
+                    print(line, end="", flush=True)
+                    if (m := _JOBID_RE.match(line)) is not None:
+                        self._jobid = m.group(1)
+                        rundb.set_lsf_jobid(self._row.run_id, self._jobid)
+                    if (m := _STARTED_RE.match(line)) is not None:
+                        rundb.set_lsf_state(self._row.run_id, f"RUN {m.group(1)}")
+                rc = await self._proc.wait()
+            except asyncio.CancelledError:  # loop teardown (e.g. ctrl-c), NOT job.cancel()
+                if self._proc is not None and self._proc.returncode is None:
+                    _signal(self._proc, self._jobid)
+                self._close(ok=False)
+                raise
         if self._stopping:  # deliberate stop: whatever the exit code, the data stands
             self._close(ok=True)
             print(f"  [{self.name}] stopped", flush=True)
@@ -168,7 +210,7 @@ class Job:
         self._close(ok=rc == 0)
         print(f"  [{self.name}] {'ok' if rc == 0 else 'FAILED'}", flush=True)
         if rc != 0:
-            raise JobFailed(f"{self.job_key} exited {rc}")
+            raise JobFailed(self.job_key, f"exited {rc}")
         return self._row.outdir
 
 
@@ -180,7 +222,7 @@ class Ctx:
     def __init__(self, prefix: str, cmd_prefix: "list[str] | None" = None,
                  repo: "str | None" = None, root: "str | None" = None,
                  forced: "dict[str, list[str]] | None" = None,
-                 caller_file: "str | None" = None):
+                 caller_file: "str | None" = None, max_parallel: int = 32):
         if repo is None:
             caller = caller_file or sys._getframe(1).f_globals.get("__file__")
             assert caller, "can't locate the experiment file -- pass repo= explicitly"
@@ -191,6 +233,7 @@ class Ctx:
         self.forced = forced or {"new": [], "extend": [], "replace": []}
         self._matched: "set[str]" = set()
         self._jobs: "dict[str, Job]" = {}
+        self._sem = asyncio.Semaphore(max_parallel)
 
     def _forced_mode(self, name: str) -> "str | None":
         for mode in ("replace", "extend", "new"):
@@ -204,54 +247,43 @@ class Ctx:
         input_ids = [d.run_id for d in deps if d.run_id is not None]
         job._row = rundb.start_managed(job.job_key, job._mode, argv=job._argv, inputs=input_ids)
 
-    def submit(self, name: str, cmd: "list[str]", deps: "tuple[Job, ...] | list[Job]" = (),
-               cmd_prefix=None, outdir_args: "list[str] | None" = None) -> Job:
-        """Submit a job (ledger-memoized). ``cmd`` is the worker's own argv; ``deps`` are
-        awaited before launch, recorded as input provenance, and handed to the child as
-        $SPEARMINT_INPUTS; ``cmd_prefix`` overrides the ctx-wide one (a list, or a callable
-        receiving the job_key -- lsf.gpu()/cpu() work unchanged). Skip rule mirrors the DAG
-        scheduler: done row + not forced + no dep re-ran this session -> skip; a not-done job
-        defaults to mode "replace", a force/cascade to its named mode/"new"."""
-        assert name not in self._jobs, f"job {name!r} submitted twice"
+    def submit(self, name: str, cmd, deps: "tuple[Job, ...] | list[Job]" = (),
+               cmd_prefix=None, outdir_args: "list[str] | None" = None,
+               key: "str | None" = None, force: "str | None" = None) -> Job:
+        """Submit a job (ledger-memoized). ``cmd`` is the worker's own argv -- a list, or a
+        CALLABLE returning one, evaluated only after ``deps`` are done (so it may reference
+        their savedirs: the Stage-lambda pattern). ``deps`` are awaited before launch,
+        recorded as input provenance, and handed to the child as $SPEARMINT_INPUTS;
+        ``cmd_prefix`` overrides the ctx-wide one (a list, or a callable receiving the job_key
+        -- lsf.gpu()/cpu() work unchanged). ``key``/``force`` are the AOT layer's hooks: a full
+        job_key override, and an explicit mode bypassing the CLI pattern matching. Skip rule
+        mirrors the DAG scheduler: done row + not forced + no dep re-ran this session -> skip;
+        a not-done job defaults to mode "replace", a force/cascade to its named mode/"new"."""
         deps = tuple(deps)
-        job_key = f"{self.prefix}/{name}"
+        job_key = key or f"{self.prefix}/{name}"
+        assert job_key not in self._jobs, f"job {job_key!r} submitted twice"
         job = Job(self, name, job_key)
-        self._jobs[name] = job
+        self._jobs[job_key] = job
 
-        forced = self._forced_mode(name)
+        forced = force if force is not None else self._forced_mode(name)
+        job._prefix = self.cmd_prefix if cmd_prefix is None else (
+            cmd_prefix(job_key) if callable(cmd_prefix) else list(cmd_prefix)
+        )
+        job._cmd = cmd
+        job._outdir_args = outdir_args
         if not deps:
             # Dep-free jobs decide NOW: skip needs no waiting, and a launching job's row is
             # minted synchronously so job.outdir is immediately usable (validators).
             if forced is None and rundb.is_done(job_key):
                 job._row = _done_row(job_key)
-                print(f"[skip] {name}: already done ({job_key})", flush=True)
+                job.skipped = True
+                _skip_print(name, job_key)
                 job._task = asyncio.get_running_loop().create_task(_done(job._row.outdir))
                 return job
             job._mode = forced or "replace"
-        prefix = self.cmd_prefix if cmd_prefix is None else (
-            cmd_prefix(job_key) if callable(cmd_prefix) else list(cmd_prefix)
-        )
-        base_cmd = [*prefix, *cmd]
-        job._argv = base_cmd if outdir_args is None else [*base_cmd, *outdir_args]
-        if not deps:
+            job._resolve_spec()
             self._insert_row(job, deps)
-
-        def make_cmd(row: rundb.Run) -> "list[str]":
-            inputs_env = (
-                [f"SPEARMINT_INPUTS={os.pathsep.join(d._row.outdir for d in deps)}"] if deps else []
-            )
-            return [
-                "env",
-                f"SPEARMINT_JOB_KEY={job_key}",
-                f"SPEARMINT_MODE={job._mode}",
-                f"SPEARMINT_RUN_ROW={row.run_id}",
-                f"SPEARMINT_RUN_OUTDIR={row.outdir}",
-                *inputs_env,
-                *base_cmd,
-                *(a.format(row.outdir) for a in outdir_args or []),
-            ]
-
-        job._task = asyncio.get_running_loop().create_task(job._run(deps, make_cmd, forced))
+        job._task = asyncio.get_running_loop().create_task(job._run(deps, forced))
         return job
 
     def warn_unmatched(self) -> None:
@@ -263,6 +295,17 @@ class Ctx:
 
 async def _done(savedir: str) -> str:
     return savedir
+
+
+def _skip_print(name: str, job_key: str) -> None:
+    """[skip] plus a ledger-based [stale] warning: recorded-input provenance says which deps
+    have newer results than this job's last success consumed (rundb.stale_inputs -- works for
+    any skip, no DAG needed)."""
+    stale = rundb.stale_inputs(job_key)
+    if stale:
+        print(f"[stale] {name}: {stale} have newer results than {job_key}'s last success "
+              f"was built from -- skipping anyway (--new/--extend/--replace to force)", flush=True)
+    print(f"[skip] {name}: already done ({job_key})", flush=True)
 
 
 def _done_row(job_key: str) -> rundb.Run:

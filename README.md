@@ -72,6 +72,26 @@ tail -f output_rundb/_lsf_logs/my_exp_driver.log
 A file with its own args (a cost tier, say) parses them first and hands the rest to spearmint:
 `args, rest = parser.parse_known_args(); build(TIERS[args.tier]).main(rest)`.
 
+The DAG is a declarative layer over an asyncio core (`spearmint.aio`). Anything the static
+plan can't say — a validator running *while* training runs, retry loops, dynamic fan-out — is
+written directly against the core, with the same ledger rows and identity:
+
+```python
+async def main(ctx):
+    train = ctx.submit("train", ["train.py"], cmd_prefix=lsf.gpu())
+    val = ctx.submit("val", ["validate.py", "--watch", train.outdir],
+                     force=None if train.skipped else "new")
+    try:
+        await train
+    finally:
+        val.cancel()          # stop when train stops; its row closes done, its data stands
+    await ctx.submit("plot", ["plot.py"], deps=(val,))
+
+aio.main(main, prefix="e07", cmd_prefix=["uv", "run", "python"])
+```
+
+See `examples/toy_aio_sidecar.py`; `sidecar.md` records why this is code, not configuration.
+
 Workers never see spearmint in their argv — run identity travels as `SPEARMINT_*` environment
 variables, invisible to hydra/argparse/click parsing. So a worker adopts at one of two levels:
 

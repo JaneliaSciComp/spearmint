@@ -1,25 +1,23 @@
-"""Minimal DAG scheduler over rundb.py -- a from-scratch prototype of "phase 2" (job_key-tagged
-stages, skip-if-done via a Stage's own resolved `.savedir`, dependency paths read straight off
-an upstream Stage's `.savedir` instead of fixed at build time), kept deliberately separate from
-orchestration.py so it can be freely reshaped without touching anything that already works.
+"""AOT-declared DAG plans, compiled onto the aio execution core. An experiment file builds
+``Experiment``/``Stage``s -- a STATIC plan, so force flags validate against real stage names
+up front, cycles fail at run start, and the whole pipeline is visible before anything launches
+-- and ``run_experiment`` lowers it to ``aio.Ctx.submit`` calls: each stage becomes a
+ledger-memoized awaitable Job whose deps ARE its requires. Ordering, skip-if-done, force
+cascades, failure/abandon propagation, and MAX_PARALLEL all come from the aio layer; this
+module contributes only the declarative surface and its up-front validation.
 
-Stages run as blocking subprocesses (plain local commands, or LSF jobs via a bsub -K prefix --
-see lsf.py), independent ones concurrently, and the ONLY state this scheduler tracks itself is
-which stages to abandon after a failure. All completion/identity bookkeeping lives in rundb.db,
-with the rows of scheduler-launched stages MANAGED by this driver (inserted at launch, closed
-from the stage's exit code -- compute nodes must never write the shared-filesystem sqlite db;
-see rundb.start_managed/finish_managed and rundb.run's managed branch).
+Anything the static plan can't say (validators running WHILE training runs, retry loops,
+dynamic fan-out) is written directly against spearmint.aio -- same ledger rows, same identity,
+freely mixable per experiment file. See examples/toy_aio_sidecar.py.
 """
 
-import os
-import re
-import subprocess
+import asyncio
 import sys
-from concurrent import futures
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from . import aio
 from . import rundb
 
 # Max concurrently-running stage subprocesses. A ready stage beyond this stays pending until a
@@ -298,43 +296,6 @@ def _topo_order(stages: "list[Stage]") -> "list[Stage]":
     return order
 
 
-def _transitive_dependents(seeds: "list[Stage]", dependents: "dict[Stage, list[Stage]]") -> "set[Stage]":
-    """Reverse-edge closure, including the seeds themselves -- forcing a stage to redo its work
-    means everything that reads its (possibly now different) output needs to redo theirs too."""
-    out: "set[Stage]" = set()
-    stack = list(seeds)
-    while stack:
-        s = stack.pop()
-        if s in out:
-            continue
-        out.add(s)
-        stack.extend(dependents.get(s, []))
-    return out
-
-
-def _stale_deps(s: "Stage") -> "list[str]":
-    """job_keys s's most recent success was built against an outdated version of. Prefers exact
-    recorded provenance (rundb.stale_inputs -- the input run_ids this scheduler stamped onto the
-    run; robust to a dep re-run via "extend" reusing its directory, and to same-second ties).
-    Falls back to a timestamp heuristic when the run has no recorded inputs (launched outside
-    dagrunner): a dep is stale if its most recent success FINISHED after s's most recent success
-    STARTED -- only "dep fully finished before s started reading" counts as fresh, which also
-    catches a dep whose re-run was still in flight when s began. The fallback infers what s read
-    from when it ran, not from a record of what it read."""
-    exact = rundb.stale_inputs(s.job_key)
-    if exact is not None:
-        return exact
-    mine = rundb.started_at(s.job_key, status="done")
-    if mine is None:
-        return []
-    stale = []
-    for d in s.requires:
-        dep_ended = rundb.ended_at(d.job_key, status="done")
-        if dep_ended is not None and dep_ended > mine:
-            stale.append(d.job_key)
-    return stale
-
-
 def closure(stages: "list[Stage]") -> "list[Stage]":
     """``stages`` plus every Stage they require, transitively -- for handing a consumer
     experiment's stages to run_experiment such that its shared/external requires get BUILT as
@@ -355,24 +316,6 @@ def closure(stages: "list[Stage]") -> "list[Stage]":
     return out
 
 
-def _run_stage(cmd: "list[str]", run_id: int) -> int:
-    """Launch a stage process, streaming its stdout through ours while watching bsub -K's
-    chatter (never printed by a plain local command): the 'Job <id> is submitted' ack upgrades
-    the managed row's liveness handle from the driver's identity to the stage's own LSF job id
-    (and marks it PEND -- freshly submitted means queued), and '<<Starting on <host>>>' records
-    the queued->running transition, host included. No bjobs polling -- the information streams
-    past us anyway. Returns the process's exit code."""
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        print(line, end="", flush=True)
-        m = re.match(r"Job <(\d+)> is submitted", line)
-        if m is not None:
-            rundb.set_lsf_jobid(run_id, m.group(1))
-        m = re.match(r"<<Starting on (\S+?)>>", line)
-        if m is not None:
-            rundb.set_lsf_state(run_id, f"RUN {m.group(1)}")
-    return proc.wait()
 
 
 def run_experiment(
@@ -382,66 +325,33 @@ def run_experiment(
     replace: "list[Stage] | None" = None,
     on_update: "Callable[[], None] | None" = None,
 ) -> "dict[str, str]":
-    """Run every stage, independent stages CONCURRENTLY: a stage launches (as a local
-    subprocess) as soon as every local require of it is finalized, and the scheduler then blocks
-    in concurrent.futures.wait -- event-driven, no polling -- until some child exits, finalizes
-    it, and launches whatever that unlocked. Skip stages rundb.py already has a 'done' row for.
-    Abandon a stage's transitive dependents if it (or any of its own requires) failed/was
-    abandoned -- orchestration._run_dag's same rule, applied as stages finalize.
+    """Lower the static plan onto the aio core and run it to completion. Every stage becomes
+    one ``aio.Ctx.submit`` whose deps are its local requires -- ordering, skip-if-done, the
+    force cascade (a re-run dep forces dependents to "new"), failure/abandon propagation
+    (JobFailed through the awaits), MAX_PARALLEL, and the [run]/[skip]/[stale] prints all come
+    from aio. This function contributes the up-front validation the static plan enables:
+    duplicate force buckets, cycles (via _topo_order's assert), and externals -- a ``requires``
+    target outside ``stages`` is never run in this pass, so it's resolved and asserted
+    already-done BEFORE anything launches (schedule it too via closure() to build it instead).
 
-    A ``requires`` target outside ``stages`` (an external/shared stage -- see _topo_order and
-    closure()) is never run in this pass, so its state can't change during it: every external is
-    resolved (its ``.savedir`` populated) and asserted already-done UP FRONT, before anything
-    launches. This scheduler never waits on an external -- one that isn't done is a hard error
-    before any work starts, not something to queue behind.
-
-    ``new``/``extend``/``replace`` each force a stage to run despite already being done, plus
-    its transitive dependents (their own prior output was computed against the old version of
-    this stage's output, so they need to see the new one too) -- those dependents always get a
-    plain ``new`` treatment regardless of which bucket the seed stage came from. The mode goes
-    to rundb.start_managed, which resolves what it actually means for the outdir (fresh /
-    resume job_key's last one / clear-then-reuse job_key's last one):
-      new:     a normal from-scratch re-attempt, fresh directory.
-      extend:  resume into the SAME directory the stage last wrote.
-      replace: clear job_key's most recent outdir and start over in that SAME directory --
-               older outdirs from earlier "new" attempts are left untouched (this supersedes
-               only the one attempt being replaced, not job_key's whole history).
-
-    A stage that isn't done yet and ISN'T in any of new=/extend=/replace= (the common case: it
-    simply hasn't succeeded before) defaults to "replace", not "new" -- this branch is only ever
-    reachable when job_key has no 'done' row at all (a done stage is permanently skipped instead,
-    see below), so "replace" here can never destroy a successful result, only clear away a
-    wip/failed attempt before retrying in the same directory. For a stage's true first-ever
-    attempt this degenerates to exactly "new" (nothing to clear yet). This keeps a debug
-    run-fails-fix-rerun loop from leaving one orphaned directory behind per failed attempt.
-    One nuance: a "wip" row (a subprocess killed hard enough -- e.g. SIGKILL -- to bypass
-    rundb.run()'s exception handling) is cleared the same way; don't rely on this default while a
-    same-job_key process might still be concurrently writing into that directory.
-
-    A stage that's about to be skipped (already done, not forced) whose dependencies completed
-    MORE RECENTLY than it last did prints a [stale] warning first -- it still skips (this
-    scheduler never auto-forces just because something upstream changed), but it tells you."""
+    ``new``/``extend``/``replace`` force the named stages despite being done (see rundb._start
+    for what each mode means for the outdir); their dependents re-run as "new" automatically.
+    A stage that isn't done and isn't forced defaults to "replace" (only reachable with no
+    done row, so it can only clear a failed/wip attempt -- keeps the debug loop from littering
+    one orphan dir per attempt). Returns {job_key: done|skipped|failed|abandoned}."""
     local = set(stages)
     seeds_all = [s for group in (replace, extend, new) if group for s in group]
     assert len(seeds_all) == len(set(seeds_all)), (
         "a stage was passed to more than one of replace=/extend=/new="
     )
     seed_mode: "dict[Stage, str]" = {}
-    for s in replace or []:
-        seed_mode[s] = "replace"
-    for s in extend or []:
-        seed_mode[s] = "extend"
-    for s in new or []:
-        seed_mode[s] = "new"
-    dependents = _reverse_edges(stages)
-    forced = _transitive_dependents(list(seed_mode), dependents) if seed_mode else set()
-    mode = {s: seed_mode.get(s, "new") for s in forced}
-
-    order = _topo_order(stages)
+    for mode_name, group in (("replace", replace), ("extend", extend), ("new", new)):
+        for s in group or []:
+            seed_mode[s] = mode_name
+    order = _topo_order(stages)  # deterministic submit order + the cycle assert
 
     # Externals never run in this pass, so their state is fixed: resolve every one's savedir
-    # (confirming it's actually done, via savedir being non-None instead of a separate
-    # rundb.is_done query) before anything launches.
+    # (confirming it's actually done) before anything launches.
     for s in order:
         external_not_done = []
         for d in s.requires:
@@ -454,23 +364,18 @@ def run_experiment(
             f"run whatever builds them first, or schedule them too via closure()"
         )
 
-    # Keyed by job_key, not stage name -- names are only unique within one Experiment, and
-    # run_experiment can be handed stages from several (see toy_dag_a.py running a shared stage).
-    # A stage is finalized once its job_key is present here; a stage is READY to launch once
-    # every local require is finalized.
-    status: "dict[str, str]" = {}
-    pending = list(order)
-    # Future -> (stage, its managed row's run_id) for each currently-running child.
-    running: "dict[futures.Future, tuple[Stage, int]]" = {}
+    assert rundb._ANCHOR is not None  # Experiment() anchored when the stages were declared
+    return asyncio.run(_run_plan(order, local, seed_mode, on_update))
 
-    def finalize(s: Stage, st: str) -> None:
-        status[s.job_key] = st
-        if st == "done":
-            s._savedir = rundb.latest_outdir(s.job_key, status="done")
+
+async def _run_plan(order, local, seed_mode, on_update) -> "dict[str, str]":
+    anchor = rundb._ANCHOR
+    assert anchor is not None
+    ctx = aio.Ctx(prefix="", cmd_prefix=[], repo=anchor.repo or anchor.root, root=anchor.root,
+                  max_parallel=MAX_PARALLEL)
 
     def update() -> None:
-        """Re-render the experiment's report (Experiment.report -> on_update). Presentation
-        must never endanger the run: a raising report prints and the DAG carries on."""
+        """Presentation must never endanger the run: a raising report prints and we carry on."""
         if on_update is None:
             return
         try:
@@ -478,94 +383,50 @@ def run_experiment(
         except Exception as e:  # noqa: BLE001 -- see docstring
             print(f"[report] render failed: {e!r}", flush=True)
 
-    update()  # initial render, so the report exists (all-waiting) from the first second
-    with futures.ThreadPoolExecutor(max_workers=max(1, min(MAX_PARALLEL, len(stages)))) as pool:
-        while pending or running:
-            # Launch pass: pending is in topo order, so a stage finalized here (abandoned or
-            # skipped) unlocks its own dependents later in the SAME scan -- after one scan,
-            # every stage is finalized, running, or genuinely waiting on a running child.
-            still_pending: "list[Stage]" = []
-            for s in pending:
-                deps = [d for d in s.requires if d in local]
-                if any(status.get(d.job_key) in ("failed", "abandoned") for d in deps):
-                    finalize(s, "abandoned")
-                    print(f"[abandon] {s.name}: upstream failed/abandoned", flush=True)
-                    continue
-                if not all(d.job_key in status for d in deps):
-                    still_pending.append(s)
-                    continue
-                if s not in mode:
-                    s._savedir = rundb.latest_outdir(s.job_key, status="done")
-                    if s._savedir is not None:
-                        stale = _stale_deps(s)
-                        if stale:
-                            print(
-                                f"[stale] {s.name}: {stale} have newer results than {s.job_key}'s last "
-                                f"success was built from -- skipping anyway (pass new=/extend=/replace= to force)",
-                                flush=True,
-                            )
-                        finalize(s, "skipped")
-                        print(f"[skip] {s.name}: already done ({s.job_key})", flush=True)
-                        continue
-                if len(running) >= MAX_PARALLEL:
-                    still_pending.append(s)  # ready, but all slots busy -- retry next scan
-                    continue
-                stage_mode = mode.get(s, "replace")
-                base_cmd = s.command()
-                # Provenance, known exactly at launch: the dep runs whose outputs this stage is
-                # about to read (all confirmed done by this point) -- stamped at row insert.
-                input_ids: "list[int]" = []
-                for d in s.requires:
-                    rid = rundb.latest_run_id(d.job_key, status="done")
-                    assert rid is not None, f"{s.name}: require {d.job_key} has no done run"
-                    input_ids.append(rid)
-                # This DRIVER inserts the stage's row (managed run) and closes it from the exit
-                # code below -- the child never touches the db (compute nodes writing one sqlite
-                # file over the shared filesystem is what broke). EVERY stage gets the
-                # ``env SPEARMINT_*=...`` identity prefix, invisible to its own argv parsing
-                # (identity itself is recorded on the row, not in argv): a native child's
-                # rundb.run() sees RUN_ROW/RUN_OUTDIR and skips all db work -- and so does an
-                # outdir_args worker that happens to call rundb.run() anyway (without the env it
-                # would silently become an UNMANAGED compute-node db writer). bsub ships the
-                # submission environment to the compute node, so the prefix may wrap a bsub
-                # launcher. outdir_args templates are recorded on the row VERBATIM ("output={}")
-                # -- the formatted values aren't knowable before the row exists (run_id names
-                # the outdir), and the row's own outdir column completes them unambiguously.
-                argv = base_cmd if s.outdir_args is None else [*base_cmd, *s.outdir_args]
-                row = rundb.start_managed(s.job_key, stage_mode, argv=argv, inputs=input_ids)
-                # $SPEARMINT_INPUTS: the deps' resolved outdirs (requires order), so a fan-in
-                # worker reads r.inputs instead of taking N paths via its own argv.
-                inputs_env = (
-                    [f"SPEARMINT_INPUTS={os.pathsep.join(d.savedir for d in s.requires)}"]
-                    if s.requires else []
-                )
-                cmd = [
-                    "env",
-                    f"SPEARMINT_JOB_KEY={s.job_key}",
-                    f"SPEARMINT_MODE={stage_mode}",
-                    f"SPEARMINT_RUN_ROW={row.run_id}",
-                    f"SPEARMINT_RUN_OUTDIR={row.outdir}",
-                    *inputs_env,
-                    *base_cmd,
-                    *(a.format(row.outdir) for a in s.outdir_args or []),
-                ]
-                print(f"[run] {s.name}: {' '.join(cmd)}", flush=True)
-                running[pool.submit(_run_stage, cmd, row.run_id)] = (s, row.run_id)
-            pending = still_pending
-            if not running:
-                assert not pending, f"scheduler stuck with pending stages {[s.name for s in pending]}"
-                break
-            # Block until at least one child exits, then finalize it. With a report to keep
-            # fresh, wake on a timer too (mid-stage data -- a growing metrics.jsonl -- changes
-            # with no finalize to piggyback on); an empty done_futs is just a tick.
-            done_futs, _ = futures.wait(running, return_when=futures.FIRST_COMPLETED,
-                                        timeout=REPORT_TICK_SECONDS if on_update else None)
-            for fut in done_futs:
-                s, run_id = running.pop(fut)
-                ok = fut.result() == 0
-                rundb.finish_managed(run_id, ok)
-                finalize(s, "done" if ok else "failed")
-                print(f"  [{s.name}] {'ok' if ok else 'FAILED'}", flush=True)
-            update()  # finalize batch, or a bare tick -- either way the report re-renders
-    update()  # final render: every stage finalized (skips/abandons included)
+    jobs: "dict[Stage, aio.Job]" = {}
+
+    def _stash_savedir(s: Stage, j: "aio.Job"):
+        # Resolve Stage.savedir the moment its job finishes -- callbacks attach here,
+        # synchronously at submit, so they run BEFORE any dependent's gather resumes and
+        # evaluates a cmd lambda that reads upstream.savedir (call_soon is FIFO).
+        def cb(_fut) -> None:
+            if j._row is not None and not _fut.cancelled() and _fut.exception() is None:
+                s._savedir = j._row.outdir
+        return cb
+
+    for s in order:
+        jobs[s] = ctx.submit(
+            s.name, cmd=s.command, deps=[jobs[d] for d in s.requires if d in local],
+            key=s.job_key, force=seed_mode.get(s), outdir_args=s.outdir_args,
+        )
+        jobs[s]._task.add_done_callback(_stash_savedir(s, jobs[s]))
+    ticker = None
+    if on_update is not None:
+        for j in jobs.values():  # re-render the report the moment anything finalizes
+            j._task.add_done_callback(lambda _fut: update())
+
+        async def _tick() -> None:
+            while True:  # module var read each lap, so demos can retune it pre-run
+                await asyncio.sleep(REPORT_TICK_SECONDS)
+                update()
+
+        ticker = asyncio.create_task(_tick())
+    update()  # initial render: the report exists (all-waiting) from the first second
+
+    results = await asyncio.gather(*(jobs[s]._task for s in order), return_exceptions=True)
+    if ticker is not None:
+        ticker.cancel()
+    update()  # final render: every stage finalized
+
+    status: "dict[str, str]" = {}
+    for s, res in zip(order, results):
+        if isinstance(res, aio.JobFailed):
+            st = "failed" if res.job_key == s.job_key else "abandoned"
+            if st == "abandoned":
+                print(f"[abandon] {s.name}: upstream failed/abandoned", flush=True)
+        elif isinstance(res, BaseException):
+            raise res  # ctrl-c / unexpected errors propagate, never swallowed into a status
+        else:
+            st = "done" if jobs[s].ran else "skipped"
+        status[s.job_key] = st
     return status
