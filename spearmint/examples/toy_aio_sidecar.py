@@ -1,12 +1,20 @@
 #!/usr/bin/env python
-"""aio bakeoff: the case the DAG can't express -- a validation sidecar that runs WHILE
-training runs. No watch=/stop=/on_fail= vocabulary: the trainer's live dir is handed to the
-watcher at submit time (row minted synchronously for dep-free jobs, so ``train.outdir`` is
-usable immediately), "stop when train stops" is try/finally + cancel(), and the cancelled
-watcher still resolves as done (its validations stand), so summary can depend on it.
+"""aio bakeoff: the cases the DAG can't express, as ordinary code. Two lifecycle patterns:
+
+1. A validation SIDECAR running WHILE training runs: the trainer's live dir is handed to the
+   watcher at submit time (rows for dep-free jobs are minted synchronously, so
+   ``train.outdir`` is usable immediately), "stop when train stops" is try/finally +
+   cancel(), and the cancelled watcher still resolves done (its validations stand), so
+   summary can depend on it. Freshness WITHOUT wait-coupling: ``force=None if train.skipped
+   else "new"`` -- deps= would serialize them, which is exactly wrong.
+2. A continuously re-rendered REPORT: an in-driver task looping render+sleep -- the same
+   sidecar shape minus the subprocess. The raw pattern owns its own isolation (the try/except
+   in the loop); the DAG layer's ``e.report`` is sugar bundling exactly that plus the output
+   convention and triggers.
 
     uv run python spearmint/examples/toy_aio_sidecar.py
-    uv run python spearmint/examples/toy_aio_sidecar.py --new train   # rerun; watcher+summary cascade
+    uv run python spearmint/examples/toy_aio_sidecar.py --new train   # rerun; val+summary cascade
+    spearmint browse   # aio_sidecar 📈 -> the live report
 
 Every policy the sidecar design needed a knob for is a line of code here:
   stop="any"        -> asyncio.wait([...], return_when=FIRST_COMPLETED) then cancel()
@@ -15,7 +23,11 @@ Every policy the sidecar design needed a knob for is a line of code here:
   on_fail="abandon" -> just let the JobFailed propagate through the awaits
 """
 
-from spearmint import aio
+import asyncio
+import json
+from pathlib import Path
+
+from spearmint import aio, rundb, viz
 
 SCRIPT = "spearmint/examples/script.py"
 WATCHER = "spearmint/examples/watcher.py"
@@ -23,17 +35,41 @@ WATCHER = "spearmint/examples/watcher.py"
 
 async def main(ctx: aio.Ctx) -> None:
     train = ctx.submit("train", [SCRIPT, "--stage=a"])
-    # Freshness-coupled WITHOUT wait-coupling: deps= would make val wait for train, which is
-    # exactly wrong -- instead its skip decision mirrors train's (train skipped -> val may
-    # skip too; train running -> val must run alongside).
     val = ctx.submit("val", [WATCHER, "--watch", train.outdir],
                      force=None if train.skipped else "new")
+
+    ## `live=True` means the browser tab refreshes the html file
+    def render(live: bool) -> None:
+        curves = {}  # every jsonl in both LIVE dirs, re-read fresh each render
+        for job in (train, val):
+            for f in Path(job.outdir).glob("*.jsonl"):
+                curves[f"{job.name}:{f.stem}"] = \
+                    [json.loads(ln) for ln in f.read_text().splitlines()]
+        out = Path(rundb.root()) / rundb.REPORTS_DIR / ctx.prefix
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.html").write_text(viz.page(
+            viz.lines(curves, x="step", logy=True, title="train + val, live"),
+            title=ctx.prefix, refresh=2 if live else None,
+        ))
+
+    ## loop so that the html file rerenders to reflect new data
+    async def report_loop() -> None:
+        while True:
+            try:
+                render(live=True)
+            except Exception as e:  # raw pattern: isolation is YOUR job (e.report bundles it)
+                print(f"[report] render failed: {e!r}", flush=True)
+            await asyncio.sleep(2)
+
+    rep = asyncio.create_task(report_loop())
     try:
         await train
     finally:
         val.cancel()  # stop when train stops (success OR failure -- finally is the semantics)
     await val         # resolves 'done': the validations it made stand
     await ctx.submit("summary", [SCRIPT, "--stage=summary"], deps=(val,))
+    rep.cancel()
+    render(live=False)  # final render drops the meta-refresh; the open tab goes quiet
 
 
 if __name__ == "__main__":
