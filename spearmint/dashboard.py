@@ -30,7 +30,9 @@ REFRESH_SECONDS = 10  # status-table auto-refresh (ledger mode's home page only)
 _STYLE = """
   #meta { color: #8b949e; margin-bottom: 12px; }
   tr.group td { padding-top: 16px; color: #58a6ff; font-weight: 600; }
-  td.key { color: #c9d1d9; } td.stale { color: #8b949e; }
+  /* stage links muted -- the blue bold group rows carry the visual structure */
+  td.key a { color: #8b949e; } td.key a:hover { color: #c9d1d9; }
+  td.key { color: #8b949e; } td.stale { color: #8b949e; }
   .mark { color: #8b949e; }  /* trailing content-kind glyphs (explorer.CONTENT_SYMBOLS) */
   .badge { padding: 1px 7px; border-radius: 10px; font-size: 11px; color: #0d1117; }
   .done { background: #3fb950; } .failed { background: #f85149; color: #fff; }
