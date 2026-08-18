@@ -38,7 +38,8 @@ async def main(ctx: aio.Ctx) -> None:
     val = ctx.submit("val", [WATCHER, "--watch", train.outdir],
                      force=None if train.skipped else "new")
 
-    ## `live=True` means the browser tab refreshes the html file
+    ## `live=True` makes an open tab poll the html file and update its plots in place
+    ## (zoom/pan survive); the final render drops the live marker and the tab goes quiet
     def render(live: bool) -> None:
         curves = {}  # every jsonl in both LIVE dirs, re-read fresh each render
         for job in (train, val):
@@ -69,7 +70,7 @@ async def main(ctx: aio.Ctx) -> None:
     await val         # resolves 'done': the validations it made stand
     await ctx.submit("summary", [SCRIPT, "--stage=summary"], deps=(val,))
     rep.cancel()
-    render(live=False)  # final render drops the meta-refresh; the open tab goes quiet
+    render(live=False)  # final render drops the live marker; the open tab stops polling, zoom intact
 
 
 if __name__ == "__main__":

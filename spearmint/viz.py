@@ -97,6 +97,9 @@ def lines(
         "margin": {"t": 24, "r": 10}, "paper_bgcolor": "#0d1117", "plot_bgcolor": "#161b22",
         "font": {"color": "#c9d1d9"}, "showlegend": True, "legend": {"orientation": "h"},
         "height": 380 * nrows,
+        # Constant across re-renders, so Plotly.react (page()'s live poller) keeps the USER's
+        # zoom/pan/legend state while the data underneath updates.
+        "uirevision": "keep",
     }
     if n > 1:
         layout["grid"] = {"rows": nrows, "columns": ncols, "pattern": "independent"}
@@ -106,9 +109,12 @@ def lines(
         layout[f"xaxis{s}"] = {"title": f"{facet}={facet_vals[i]}" if facet_vals else (x or "index")}
     pid = f"viz{next(_ids)}"
     head = f"<h2>{_html.escape(title)}</h2>" if title else ""
-    return (f'{head}<div id="{pid}" style="width:100%"></div>'
-            f'<script>Plotly.newPlot("{pid}", {json.dumps(traces)}, {json.dumps(layout)}, '
-            f"{{displayModeBar: false}});</script>")
+    # Data rides in a JSON island next to an empty div; page()'s shared runtime draws every
+    # island (initial load AND live updates go through the same Plotly.react). "</" escaped so
+    # payload strings can never terminate the script element.
+    payload = json.dumps({"traces": traces, "layout": layout}).replace("</", "<\\/")
+    return (f'{head}<div id="{pid}" class="vizplot" style="width:100%"></div>'
+            f'<script type="application/json" id="{pid}-data">{payload}</script>')
 
 
 def table(columns: "dict[str, dict]", metrics: "list[str] | None" = None, title: str = "") -> str:
@@ -257,18 +263,74 @@ _LIGHTBOX_JS = """
 """
 
 
+# The page runtime: draws every plot island (initial load and updates alike go through
+# Plotly.react -- with layout.uirevision constant, the user's zoom/pan SURVIVES data updates),
+# and, when __INTERVAL__ > 0, polls this page's own URL: plot islands whose data changed are
+# react'ed in place; a section whose NON-plot structure changed is hot-swapped (its plots
+# redraw fresh); a fetched page without data-live (the run's final render) stops the polling
+# -- the tab goes quiet WITH the zoom state intact. Sections are matched by position, so keep
+# a live report's section count stable ("" placeholders are fine). Built with placeholder
+# replace (not an f-string) so the JS braces don't need doubling.
+_RUNTIME_JS = """
+(function(){
+  var CFG = {displayModeBar: true, scrollZoom: true, responsive: true};
+  function strip(el){  // a section's structural html: islands blanked (data is not structure)
+    var c = el.cloneNode(true);
+    c.querySelectorAll("script[type='application/json']").forEach(function(n){ n.textContent = ""; });
+    return c.innerHTML;
+  }
+  function draw(){
+    document.querySelectorAll("div.vizplot").forEach(function(div){
+      var isl = document.getElementById(div.id + "-data");
+      if (!isl) return;
+      var d = JSON.parse(isl.textContent);
+      Plotly.react(div.id, d.traces, d.layout, CFG);
+    });
+  }
+  var pristine = {};  // section -> structural html as SERVED (the live DOM mutates once drawn)
+  document.querySelectorAll("div.sect").forEach(function(s){ pristine[s.id] = strip(s); });
+  draw();
+  if (__INTERVAL__ <= 0) return;
+  var iv = setInterval(function(){
+    fetch(location.href, {cache: "no-store"}).then(function(r){ return r.text(); }).then(function(text){
+      var doc = new DOMParser().parseFromString(text, "text/html");
+      doc.querySelectorAll("div.sect").forEach(function(fresh){
+        var cur = document.getElementById(fresh.id);
+        if (!cur) return;
+        if (strip(fresh) !== pristine[fresh.id]) {         // structure changed -> swap section
+          cur.innerHTML = fresh.innerHTML;
+          pristine[fresh.id] = strip(fresh);
+        } else {                                           // data-only change -> update islands
+          fresh.querySelectorAll("script[type='application/json']").forEach(function(nisl){
+            var isl = document.getElementById(nisl.id);
+            if (isl && isl.textContent !== nisl.textContent) isl.textContent = nisl.textContent;
+          });
+        }
+      });
+      draw();
+      if (!doc.body.hasAttribute("data-live")) clearInterval(iv);  // final render: stop polling
+    }).catch(function(){});  // server briefly gone: keep the page, try again next tick
+  }, __INTERVAL__ * 1000);
+})();
+"""
+
+
 def page(*sections: str, title: str = "report", refresh: "int | None" = None) -> str:
     """A self-contained HTML document wrapping ``sections`` (fragments from lines/table/images
-    or any HTML string of your own): dark shell, Plotly CDN, the image lightbox. ``refresh``
-    adds a meta-refresh (seconds) -- with the driver re-rendering as stages finish, an open
-    tab then tracks the run with zero server machinery. Pass it CONDITIONALLY
-    (``refresh=5 if missing else None``): the run's final render then emits a refresh-free
-    page and the tab stops reloading once everything is done."""
-    meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
-    body = "".join(sections)
-    return (f'<!doctype html><html><head><meta charset="utf-8">{meta}'
+    or any HTML string of your own): dark shell, Plotly CDN, the image lightbox, and the plot
+    runtime (zoom/pan toolbar + scroll-zoom on every chart). ``refresh`` (seconds) makes an
+    open tab POLL this page's own URL and update IN PLACE -- growing curves react into the
+    existing plots, so your zoom/pan survives updates (see _RUNTIME_JS). Pass it CONDITIONALLY
+    (``refresh=5 if missing else None``): the run's final render omits the live marker and the
+    tab stops polling, zoom intact. Keep a live report's section count/order stable across
+    renders ("" placeholders are fine) -- sections are matched by position."""
+    global _ids
+    body = "".join(f'<div class="sect" id="sect{i}">{s}</div>' for i, s in enumerate(sections))
+    runtime = _RUNTIME_JS.replace("__INTERVAL__", str(refresh or 0))
+    _ids = itertools.count()  # plot ids restart per page, so re-renders line up island-for-island
+    return (f'<!doctype html><html><head><meta charset="utf-8">'
             f"<title>{_html.escape(title)}</title>{_PLOT_CDN}<style>{_STYLE}</style></head>"
-            f"<body><h1>{_html.escape(title)}</h1>{body}"
+            f'<body{" data-live=\"1\"" if refresh else ""}><h1>{_html.escape(title)}</h1>{body}'
             f'<div id="viewer"><div class="hint">scroll = zoom · drag = pan · arrows = walk the '
             f'grid · Esc / click background = close</div><img id="viewer_img"/></div>'
-            f"<script>{_LIGHTBOX_JS}</script></body></html>")
+            f"<script>{_LIGHTBOX_JS}</script><script>{runtime}</script></body></html>")
