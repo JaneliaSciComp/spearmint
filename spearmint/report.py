@@ -64,14 +64,15 @@ def collect() -> "dict[str, list[JobRow]]":
 def render(groups: "dict[str, list[JobRow]]") -> str:
     """Fixed-width terminal table, one section per experiment group. A wip row with LSF
     dispatch detail shows it inline -- wip(PEND) queued vs wip(RUN <host>) actually running.
-    stale column: '-' fresh, '?' provenance unknown, else the dep job_keys with newer
+    stale column: 'no' fresh, 'n/a' provenance unknown (no recorded inputs -- the run wasn't
+    scheduler-launched), else 'yes:' + the dep job_keys with newer
     results."""
     lines: "list[str]" = []
     for group in sorted(groups):
         lines.append(group)
         for r in sorted(groups[group], key=lambda r: r.job_key):
             status = f"wip({r.lsf_state})" if r.status == "wip" and r.lsf_state else r.status
-            stale = "?" if r.stale is None else (",".join(r.stale) or "-")
+            stale = "n/a" if r.stale is None else (f"yes: {','.join(r.stale)}" if r.stale else "no")
             total = str(r.total).split(".")[0]  # a live (wip) total carries microseconds; drop them
             lines.append(
                 f"  {r.job_key:<40} {status:<16} runs={r.n_runs:<3} "
@@ -141,7 +142,7 @@ def render_html(
         )
         rows.append(f'<tr class="group"><td colspan="6">{head}</td></tr>')
         for r in sorted(groups[group], key=lambda r: r.job_key):
-            stale = "?" if r.stale is None else (", ".join(r.stale) or "–")
+            stale = "n/a" if r.stale is None else (f"yes: {', '.join(r.stale)}" if r.stale else "no")
             total = str(r.total).split(".")[0]
             key_link = f'/run/{quote(r.job_key)}'  # job_key slashes are real path structure
             have = kinds.get(r.job_key, set())
