@@ -463,11 +463,13 @@ def render_dir(outdir: str, base: str) -> str:
 
 
 class Server(http.server.ThreadingHTTPServer):
-    # allow_reuse_address=False so a still-LIVE server on this port is a hard bind failure
-    # rather than a silent coexist (the stale-server trap). A subclass, NOT a mutation of the
-    # shared http.server.ThreadingHTTPServer class -- other UIs use that same class, so setting
-    # the flag on it globally would leak this choice into anything co-imported.
-    allow_reuse_address = False
+    # allow_reuse_address (SO_REUSEADDR) permits rebinding over TIME_WAIT remnants -- without
+    # it, ctrl-c'ing a server whose tabs were recently talking to it (keep-alives, the live
+    # report poller) leaves the port unbindable for ~30-60s. It does NOT weaken the
+    # still-live-server protection: binding over an ACTIVE listener still fails loudly with
+    # EADDRINUSE on Linux/macOS regardless (that laxity would be SO_REUSEPORT, a different
+    # flag we don't set).
+    allow_reuse_address = True
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
