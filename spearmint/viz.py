@@ -94,8 +94,12 @@ def lines(
     ncols = min(n, 3)
     nrows = -(-n // ncols)
     layout: "dict" = {
-        "margin": {"t": 24, "r": 10}, "paper_bgcolor": "#0d1117", "plot_bgcolor": "#161b22",
-        "font": {"color": "#c9d1d9"}, "showlegend": True, "legend": {"orientation": "h"},
+        # Legend rides ABOVE the plot area (anchored to its own bottom at y=1, growing upward
+        # into the top margin) -- Plotly's default bottom placement for horizontal legends
+        # overlaps the x-axis title. Top margin sized for a couple of legend rows.
+        "margin": {"t": 56, "r": 10}, "paper_bgcolor": "#0d1117", "plot_bgcolor": "#161b22",
+        "font": {"color": "#c9d1d9"}, "showlegend": True,
+        "legend": {"orientation": "h", "x": 0, "xanchor": "left", "y": 1.0, "yanchor": "bottom"},
         "height": 380 * nrows,
         # Constant across re-renders, so Plotly.react (page()'s live poller) keeps the USER's
         # zoom/pan/legend state while the data underneath updates.
