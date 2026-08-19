@@ -277,10 +277,11 @@ _LIGHTBOX_JS = """
 # replace (not an f-string) so the JS braces don't need doubling.
 _RUNTIME_JS = """
 (function(){
-  // doubleClickDelay: legend single-clicks commit after this window (plotly must wait to
-  // distinguish them from a double-click's isolate gesture) -- 150ms trades snappier toggles
-  // for a tighter double-click.
-  var CFG = {displayModeBar: true, scrollZoom: true, responsive: true, doubleClickDelay: 150};
+  // Legend single-clicks commit only after plotly's doubleClickDelay window (it must wait to
+  // distinguish them from a double-click's isolate gesture). We tried 150ms -- snappier
+  // toggles, but the double-click window felt too tight to hit; plotly's 300ms default is
+  // the better trade.
+  var CFG = {displayModeBar: true, scrollZoom: true, responsive: true};
   function strip(el){  // a section's structural html: islands blanked (data is not structure)
     var c = el.cloneNode(true);
     c.querySelectorAll("script[type='application/json']").forEach(function(n){ n.textContent = ""; });
