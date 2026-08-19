@@ -186,6 +186,13 @@ _STYLE = """
   table.metrics th { color: #8b949e; border-bottom: 1px solid #30363d; }
   table.metrics td { border-bottom: 1px solid #21262d; }
   img.zoom { cursor: zoom-in; border: 1px solid #30363d; }
+  pre { background: #161b22; border: 1px solid #30363d; padding: 10px; overflow-x: auto;
+        border-radius: 6px; }
+  .da { color: #3fb950; } .dr { color: #f85149; }   /* diff added / removed */
+  tr.hl td { background: #20261c; }                 /* changed metric row */
+  input { background: #161b22; color: #c9d1d9; border: 1px solid #30363d;
+          border-radius: 4px; padding: 2px 6px; }
+  summary { cursor: pointer; color: #8b949e; }
   #viewer { position: fixed; inset: 0; background: rgba(0,0,0,.93); display: none;
             z-index: 1000; cursor: grab; overflow: hidden; }
   #viewer.open { display: block; }

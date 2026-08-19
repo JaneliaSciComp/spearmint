@@ -462,6 +462,159 @@ def render_dir(outdir: str, base: str) -> str:
     return "".join(parts_top + parts) or "<p class='note'>no renderable files in this directory</p>"
 
 
+# --- run diff -----------------------------------------------------------------------------
+# Generic dir-vs-dir comparison (diff_dirs); the dashboard layers ledger sections (argv,
+# commits, stored working diffs) on top and serves the whole thing as a viz.page.
+
+_DIFF_PAIRS_CAP = 40          # differing file pairs rendered per diff page
+_DIFF_TEXT_CAP = 256 * 1024   # bytes; larger text files -> "differs (too large)"
+_UDIFF_LINES_CAP = 400        # unified-diff lines shown per file
+_X_CANDIDATES = ("step", "epoch", "iter", "iteration", "t")  # overlay x column, if shared
+
+
+def _labels(rel_a: str, rel_b: str) -> "tuple[str, str]":
+    """Short distinguishing side labels: the relpaths minus their common leading segments --
+    different job_keys read 'train_a/run00001' vs 'train_b/run00003'; same job_key reads
+    'run00001' vs 'run00003'; identical paths fall back to an a:/b: prefix."""
+    pa, pb = rel_a.split("/"), rel_b.split("/")
+    i = 0
+    while i < min(len(pa), len(pb)) - 1 and pa[i] == pb[i]:
+        i += 1
+    la, lb = "/".join(pa[i:]), "/".join(pb[i:])
+    return (la, lb) if la != lb else (f"a:{la}", f"b:{lb}")
+
+
+def _udiff(rel: str, text_a: str, text_b: str, label_a: str, label_b: str) -> str:
+    """Colored unified diff of two small texts (+/- lines via viz's .da/.dr classes)."""
+    import difflib
+
+    lines = list(difflib.unified_diff(
+        text_a.splitlines(), text_b.splitlines(), label_a, label_b, lineterm=""))
+    shown = lines[:_UDIFF_LINES_CAP]
+
+    def cls(l: str) -> str:
+        return "da" if l.startswith("+") else ("dr" if l.startswith("-") else "")
+
+    body = "\n".join(f'<span class="{cls(l)}">{html.escape(l)}</span>' for l in shown)
+    note = (f"<p class='note'>showing {_UDIFF_LINES_CAP} of {len(lines)} diff lines</p>"
+            if len(lines) > len(shown) else "")
+    return f"<h3>{html.escape(rel)}</h3><pre>{body}</pre>{note}"
+
+
+def _delta_table(rel: str, flat_a: "dict", flat_b: "dict", label_a: str, label_b: str) -> str:
+    """Scalar JSONs side by side: metric | A | B | Δ (Δ only when both numeric); changed rows
+    highlighted."""
+
+    def fmt(v) -> str:
+        if v is None:
+            return "–"
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return html.escape(str(v))
+        return f"{v:.4g}"
+
+    rows = []
+    for k in sorted(set(flat_a) | set(flat_b)):
+        va, vb = flat_a.get(k), flat_b.get(k)
+        numeric = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (va, vb))
+        delta = f"{vb - va:+.4g}" if numeric else ""
+        rows.append(f'<tr class="{"hl" if va != vb else ""}"><td>{html.escape(k)}</td>'
+                    f"<td>{fmt(va)}</td><td>{fmt(vb)}</td><td>{delta}</td></tr>")
+    head = (f"<tr><th>metric</th><th>{html.escape(label_a)}</th>"
+            f"<th>{html.escape(label_b)}</th><th>Δ</th></tr>")
+    return f'<h3>{html.escape(rel)}</h3><table class="metrics">{head}{"".join(rows)}</table>'
+
+
+def diff_dirs(a: str, b: str, base: str, label_a: str, label_b: str) -> str:
+    """Two directories, one comparison fragment (embed in a viz.page -- it needs viz's plot
+    runtime and lightbox): files matched by IDENTICAL relpath; byte-identical ones collapse
+    into a single grouped note; tabular files (.jsonl/.csv) overlay both sides' curves on ONE
+    plot with side-labelled traces; scalar JSONs become a metric|A|B|Δ table; small texts
+    render as colored unified diffs; same-named PNGs land in one table where the lightbox's
+    ←/→ toggles the sides and ↑/↓ walks the files. One-side-only files are listed.
+    Ledger-free: any two dirs, both browse modes."""
+    from filecmp import cmp as _filecmp
+
+    from . import viz
+
+    base_path = Path(base).resolve()
+
+    def files(root: str) -> "dict[str, Path]":
+        r = Path(root)
+        return {str(p.relative_to(r)): p for p in sorted(r.rglob("*"))
+                if p.is_file() and ".zarr" not in str(p)}
+
+    fa, fb = files(a), files(b)
+    parts: "list[str]" = []
+    for label, only in ((label_a, sorted(set(fa) - set(fb))), (label_b, sorted(set(fb) - set(fa)))):
+        if only:
+            parts.append(f"<p class='note'>only in {html.escape(label)}: "
+                         f"{html.escape(', '.join(only[:20]))}</p>")
+    common = sorted(set(fa) & set(fb))
+    identical = {rel for rel in common if _filecmp(fa[rel], fb[rel], shallow=False)}
+    differing = [rel for rel in common if rel not in identical]
+    if identical:
+        parts.append(f"<p class='note'>identical: {html.escape(', '.join(sorted(identical)))}</p>")
+    if len(differing) > _DIFF_PAIRS_CAP:
+        parts.append(f"<p class='note'>comparing {_DIFF_PAIRS_CAP} of "
+                     f"{len(differing)} differing files</p>")
+
+    pngs: "list[str]" = []
+    for rel in differing[:_DIFF_PAIRS_CAP]:
+        pa, pb = fa[rel], fb[rel]
+        try:
+            if pa.suffix in (".jsonl", ".csv"):
+                cols_a, rows_a = _parse_tabular(pa)
+                cols_b, rows_b = _parse_tabular(pb)
+                if max(len(rows_a), len(rows_b)) > _PLOT_CAP:
+                    parts.append(f"<p class='note'>{html.escape(rel)}: plotting first "
+                                 f"{_PLOT_CAP} rows per side</p>")
+                x = next((c for c in _X_CANDIDATES if c in cols_a and c in cols_b), None)
+                parts.append(viz.lines({label_a: rows_a[:_PLOT_CAP], label_b: rows_b[:_PLOT_CAP]},
+                                       x=x, title=rel))
+            elif pa.suffix == ".json":
+                obj_a, obj_b = json.loads(pa.read_text()), json.loads(pb.read_text())
+                rec_a, rec_b = _records(obj_a), _records(obj_b)
+                if rec_a and rec_b:  # arrays of records -> overlay like jsonl
+                    parts.append(viz.lines({label_a: rec_a[1], label_b: rec_b[1]}, title=rel))
+                    continue
+                flat_a, flat_b = viz._flat(obj_a), viz._flat(obj_b)
+                if flat_a or flat_b:
+                    parts.append(_delta_table(rel, flat_a, flat_b, label_a, label_b))
+                else:
+                    parts.append(_udiff(rel, json.dumps(obj_a, indent=1, sort_keys=True),
+                                        json.dumps(obj_b, indent=1, sort_keys=True),
+                                        label_a, label_b))
+            elif pa.suffix == ".png":
+                pngs.append(rel)
+            elif pa.suffix in (".txt", ".yaml", ".yml", ".cfg", ".toml", ".log"):
+                if max(pa.stat().st_size, pb.stat().st_size) > _DIFF_TEXT_CAP:
+                    parts.append(f"<p class='note'>{html.escape(rel)}: differs "
+                                 f"(too large to diff)</p>")
+                else:
+                    parts.append(_udiff(rel, pa.read_text(errors="replace"),
+                                        pb.read_text(errors="replace"), label_a, label_b))
+            else:
+                parts.append(f"<p class='note'>{html.escape(rel)}: differs (binary/unhandled)</p>")
+        except Exception as e:  # noqa: BLE001 -- served page: one bad file degrades to a note
+            parts.append(f"<p class='note'>{html.escape(rel)}: diff failed "
+                         f"({html.escape(repr(e))})</p>")
+
+    if pngs:
+        head = (f"<tr><th></th><th>{html.escape(label_a)}</th>"
+                f"<th>{html.escape(label_b)}</th></tr>")
+        trs = "".join(
+            f"<tr><td>{html.escape(rel)}</td>" + "".join(
+                f'<td><img class="zoom" width="260" '
+                f'src="/file/{quote(str(p.resolve().relative_to(base_path)))}"/></td>'
+                for p in (fa[rel], fb[rel])
+            ) + "</tr>"
+            for rel in pngs
+        )
+        parts.append("<h3>images <span class='note'>(click one: ←/→ toggle sides, "
+                     f"↑/↓ walk files)</span></h3><table>{head}{trs}</table>")
+    return "".join(parts) or "<p class='note'>nothing to compare</p>"
+
+
 class Server(http.server.ThreadingHTTPServer):
     # allow_reuse_address (SO_REUSEADDR) permits rebinding over TIME_WAIT remnants -- without
     # it, ctrl-c'ing a server whose tabs were recently talking to it (keep-alives, the live

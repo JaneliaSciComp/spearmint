@@ -156,6 +156,17 @@ ssh -N -L 8766:localhost:8766 login1.int.janelia.org   # then open http://127.0.
 
 `spearmint browse` works anywhere — it needs no ledger, no config, not even a git repo.
 
+### Diffing two runs
+
+Every run page offers "diff vs previous run" plus a form for any other side; or compose
+`/diff?a=&b=` directly (each side a job_key → its latest run, or a run-dir path). The page
+answers "did my change help" in one screen: argv token diff, commit ids with a `git log`
+summary and both runs' **stored working-copy diffs** (the ledger keeps the full text — you
+see exactly what uncommitted code each run executed), scalar JSONs as metric | A | B | Δ
+tables, curves from both runs overlaid on one plot, texts as unified diffs, identical files
+collapsed, and same-named PNGs in a grid where the lightbox's ←/→ toggles sides and ↑/↓
+walks files. Works in plain-mode browse too (any two dirs; ledger sections omitted).
+
 ## Adopting spearmint in a new project
 
 1. Add the git dependency to your `pyproject.toml` and `uv sync`. For cluster runs, do the same
