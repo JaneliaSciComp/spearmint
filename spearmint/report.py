@@ -17,6 +17,15 @@ from datetime import timedelta
 from . import rundb
 
 
+def fmt_ts(ts: "str | None") -> str:
+    """rundb's filename-safe timestamp (2026-06-30-14-25-52) rendered for humans
+    (2026-06-30 14:25:52); anything unexpected passes through untouched."""
+    if not ts:
+        return ""
+    p = ts.split("-")
+    return f"{p[0]}-{p[1]}-{p[2]} {p[3]}:{p[4]}:{p[5]}" if len(p) == 6 else ts
+
+
 @dataclass
 class JobRow:
     job_key: str
@@ -76,7 +85,7 @@ def render(groups: "dict[str, list[JobRow]]") -> str:
             total = str(r.total).split(".")[0]  # a live (wip) total carries microseconds; drop them
             lines.append(
                 f"  {r.job_key:<40} {status:<16} runs={r.n_runs:<3} "
-                f"total={total:<10} last={r.started_at}  stale={stale}"
+                f"total={total:<10} last={fmt_ts(r.started_at)}  stale={stale}"
             )
         lines.append("")
     return "\n".join(lines).rstrip()
@@ -157,7 +166,7 @@ def render_html(
                 f"<td>{badge}</td>"
                 f"<td>{r.n_runs}</td>"
                 f"<td>{total}</td>"
-                f"<td>{r.started_at}</td>"
+                f"<td>{fmt_ts(r.started_at)}</td>"
                 f'<td class="stale">{html.escape(stale)}</td>'
                 "</tr>"
             )

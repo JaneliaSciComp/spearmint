@@ -230,7 +230,8 @@ def _diff_page(query: str, ledger: bool, base: str) -> str:
                 f"<td>{html.escape(str(f(row_b)))}</td></tr>"
                 for k, f in (
                     ("job_key", lambda r: r["job_key"]), ("run", lambda r: r["run_id"]),
-                    ("status", lambda r: r["status"]), ("started", lambda r: r["started_at"]),
+                    ("status", lambda r: r["status"]),
+                    ("started", lambda r: report.fmt_ts(r["started_at"])),
                     ("wall", lambda r: rundb._duration(r["started_at"], r["ended_at"])),
                 )
             )
@@ -268,7 +269,7 @@ def _run_page(job_key: str) -> str:
         return _page(f"<p>no runs for {html.escape(job_key)}</p>", live=False)
     outdir = rundb.latest_outdir(job_key) or ""
     commit = (rundb._latest("commit_id", job_key, None) or "")[:12]
-    started = rundb._latest("started_at", job_key, None) or ""
+    started = report.fmt_ts(rundb._latest("started_at", job_key, None))
     meta = (
         f"<p><a href='/'>&larr; all stages</a></p>"
         f"<h2>{html.escape(job_key)} "
