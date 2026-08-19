@@ -74,7 +74,11 @@ _PLOT_JS = """
   const data = __DATA__, cols = __COLS__;
   const xs = document.getElementById("__PID__x"), ys = document.getElementById("__PID__y");
   const isnum = c => data.some(r => r[c] !== "" && r[c] != null && !isNaN(+r[c]));
-  ys.value = cols.find(isnum) || cols[cols.length - 1];  // default y to first numeric column
+  // Defaults must differ: x prefers a step/epoch-ish column (else the first), y the first
+  // NUMERIC column that isn't x -- otherwise metrics.jsonl opened as step-vs-step.
+  xs.value = cols.find(c => ["step", "epoch", "iter", "iteration", "t"].includes(c)) || cols[0];
+  ys.value = cols.find(c => c !== xs.value && isnum(c))
+          || cols.find(c => c !== xs.value) || cols[cols.length - 1];
   function draw(){
     const x = xs.value, y = ys.value;
     Plotly.newPlot("__PID__", [{x: data.map(r => r[x]), y: data.map(r => +r[y]),
