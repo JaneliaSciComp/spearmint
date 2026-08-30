@@ -138,12 +138,15 @@ class Experiment:
         )
         self.stages: "list[Stage]" = []
         # Optional report renderer: a plain function ``fn(savedir) -> html`` (build it with
-        # spearmint.viz; ``savedir`` is self.savedir below, so partial runs render too). The
+        # spearmint.viz; ``savedir`` is self.savedir below, so partial runs render too) -- OR
+        # a ``"path/to/report_fn.py:make_report"`` spec, hot-reloaded on file change so the
+        # report code is editable WHILE a long run executes (see _load_report_fn). The
         # scheduler re-runs it after every stage finalize, every REPORT_TICK_SECONDS while
         # anything is running, and once at DAG end, writing ROOT/_reports/<prefix>/report.html
         # (linked from the status table). A raising report renders as a printed error -- it
         # can never fail or delay a stage.
-        self.report: "Callable[[Callable], str] | None" = None
+        self.report: "Callable[[Callable], str] | str | None" = None
+        self._report_mod: "tuple[float, object] | None" = None  # (mtime, module) reload cache
 
     def Stage(
         self,
@@ -192,11 +195,35 @@ class Experiment:
         assert s is not None, f"no stage named {stage!r} in experiment {self.prefix!r}"
         return rundb.latest_outdir(s.job_key, status="done")
 
+    def _load_report_fn(self, spec: str):
+        """``"path/to/report_fn.py:make_report"`` -- the module is re-executed whenever the
+        FILE's mtime changes, so report code is editable WHILE a long experiment runs: save
+        the file, the next tick (or finalize) renders with the new code; a broken save hits
+        run_experiment's [report] guard (loud print, DAG untouched) and heals on the next
+        save. The module must be import-side-effect-free -- in particular it must not build
+        Experiments (its report fn resolves stages BY NAME via savedir()/the ledger, not by
+        closing over Stage objects). Path is cwd-relative: the repo root the driver runs from."""
+        import importlib.util
+
+        pathstr, fnname = spec.rsplit(":", 1)
+        path = Path(pathstr)
+        mtime = path.stat().st_mtime
+        if self._report_mod is None or self._report_mod[0] != mtime:
+            modspec = importlib.util.spec_from_file_location(
+                f"_spearmint_report_{self.prefix.replace('/', '_')}", path)
+            assert modspec is not None and modspec.loader is not None, f"can't load {spec!r}"
+            mod = importlib.util.module_from_spec(modspec)
+            modspec.loader.exec_module(mod)
+            self._report_mod = (mtime, mod)
+            print(f"[report] loaded {spec}", flush=True)
+        return getattr(self._report_mod[1], fnname)
+
     def _render_report(self) -> None:
         assert self.report is not None
+        fn = self._load_report_fn(self.report) if isinstance(self.report, str) else self.report
         out = Path(rundb.root()) / rundb.REPORTS_DIR / self.prefix
         out.mkdir(parents=True, exist_ok=True)
-        (out / "report.html").write_text(self.report(self.savedir))
+        (out / "report.html").write_text(fn(self.savedir))
 
     def main(self, argv: "list[str] | None" = None) -> "dict[str, str] | None":
         """The standard experiment-file entrypoint -- spearmint's own flags, parsed explicitly
