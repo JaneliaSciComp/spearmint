@@ -1,6 +1,6 @@
 """``spearmint browse``: one browser UI for run ledgers AND plain results directories.
 
-    spearmint browse [dir] [--port N] [--no-browser]   # or: python -m spearmint.dashboard ...
+    spearmint browse [dir] [--port N] [--no-browser] [--takeover]   # or: python -m spearmint.dashboard ...
 
 ``dir`` defaults to <git root of cwd>/output_rundb. If it holds a ``rundb.db``, it's a spearmint
 ledger: the home page is the auto-refreshing status table (experiments x stages,
@@ -355,7 +355,8 @@ def main() -> None:
         port = int(argv[i + 1])
         del argv[i:i + 2]
     open_browser = "--no-browser" not in argv
-    argv = [a for a in argv if a != "--no-browser"]
+    takeover = "--takeover" in argv
+    argv = [a for a in argv if a not in ("--no-browser", "--takeover")]
     if len(argv) > 1:
         _cli.usage_error(__doc__, f"unexpected args {argv[1:]} (at most one directory)")
     d = Path(argv[0]).resolve() if argv else Path(rundb.default_root())
@@ -367,7 +368,7 @@ def main() -> None:
         global _BASE
         _BASE = str(d)
         handler = _PlainHandler
-    explorer.serve(handler, port, open_browser)
+    explorer.serve(handler, port, open_browser, takeover=takeover)
 
 
 if __name__ == "__main__":

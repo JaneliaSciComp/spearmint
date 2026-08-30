@@ -24,7 +24,7 @@ _USAGE = (
     "usage: spearmint <command> [args]    (`spearmint <command> -h` for per-command help)\n\n"
     "commands:\n"
     "  status [dir]                              terminal status table over a run ledger\n"
-    "  browse [dir] [--port N] [--no-browser]    browser UI: the ledger dashboard when dir\n"
+    "  browse [dir] [--port N] [--no-browser] [--takeover]    browser UI: the ledger dashboard when dir\n"
     "                                            holds a rundb.db, else a results-dir browser\n\n"
     "dir defaults to <git root of cwd>/output_rundb. Running experiments is library API, not\n"
     "a CLI verb -- see the README and spearmint/examples/.\n"

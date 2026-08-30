@@ -668,17 +668,58 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def serve(handler: "type[Handler]", port: int, open_browser: bool) -> None:
+def _takeover(port: int) -> None:
+    """Kill whatever holds ``port`` (an orphaned browse -- backgrounded servers ignore ctrl-c
+    entirely, so they pile up looking dead) and wait for the bind to become possible."""
+    import signal
+    import subprocess
+    import time
+
+    got = subprocess.run(["lsof", "-ti", f"tcp:{port}"], capture_output=True, text=True)
+    pids = [int(p) for p in got.stdout.split()]
+    for pid in pids:
+        print(f"[takeover] killing pid {pid} on port {port}", flush=True)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if not any(_alive(p) for p in pids):
+            return
+        time.sleep(0.2)
+    for pid in pids:  # still holding after SIGTERM -> escalate
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    time.sleep(0.3)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def serve(handler: "type[Handler]", port: int, open_browser: bool, takeover: bool = False) -> None:
     """Bind on loopback (a taken port is a hard, loud failure -- see Server) and serve forever
     in the foreground (ctrl-c to stop). Prints the URL plus the ssh tunnel command that reaches
     this server from another machine -- the sanctioned remote path; the bind itself is always
-    127.0.0.1."""
+    127.0.0.1. ``takeover`` kills the current port holder first (--takeover in the CLI)."""
+    if takeover:
+        _takeover(port)
     try:
         server = Server(("127.0.0.1", port), handler)
     except OSError as e:
         raise SystemExit(
             f"port {port} is already in use ({e.strerror}) -- a server is likely already "
-            f"running. Free it with:  lsof -ti tcp:{port} | xargs kill"
+            f"running (a BACKGROUNDED one ignores ctrl-c). Re-run with --takeover, or free "
+            f"it with:  lsof -ti tcp:{port} | xargs kill"
         )
     url = f"http://127.0.0.1:{port}/"
     print(f"serving {url}  (ctrl-c to stop)", flush=True)
