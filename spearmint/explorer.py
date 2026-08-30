@@ -734,20 +734,20 @@ def _alive(pid: int) -> bool:
         return True
 
 
-def serve(handler: "type[Handler]", port: int, open_browser: bool, takeover: bool = False) -> None:
-    """Bind on loopback (a taken port is a hard, loud failure -- see Server) and serve forever
-    in the foreground (ctrl-c to stop). Prints the URL plus the ssh tunnel command that reaches
-    this server from another machine -- the sanctioned remote path; the bind itself is always
-    127.0.0.1. ``takeover`` kills the current port holder first (--takeover in the CLI)."""
+def serve(handler: "type[Handler]", port: int, open_browser: bool, takeover: bool = True) -> None:
+    """Bind on loopback and serve forever in the foreground (ctrl-c to stop). Prints the URL
+    plus the ssh tunnel command that reaches this server from another machine -- the
+    sanctioned remote path; the bind itself is always 127.0.0.1. ``takeover`` (DEFAULT: the
+    newest browse wins) kills the current port holder first -- backgrounded servers ignore
+    ctrl-c entirely and pile up looking dead, so quietly replacing them beats failing."""
     if takeover:
         _takeover(port)
     try:
         server = Server(("127.0.0.1", port), handler)
     except OSError as e:
         raise SystemExit(
-            f"port {port} is already in use ({e.strerror}) -- a server is likely already "
-            f"running (a BACKGROUNDED one ignores ctrl-c). Re-run with --takeover, or free "
-            f"it with:  lsof -ti tcp:{port} | xargs kill"
+            f"port {port} is already in use ({e.strerror}) and the holder survived takeover "
+            f"-- free it by hand:  lsof -ti tcp:{port} | xargs kill -9"
         )
     url = f"http://127.0.0.1:{port}/"
     print(f"serving {url}  (ctrl-c to stop)", flush=True)
