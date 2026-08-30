@@ -627,6 +627,11 @@ class Server(http.server.ThreadingHTTPServer):
     # EADDRINUSE on Linux/macOS regardless (that laxity would be SO_REUSEPORT, a different
     # flag we don't set).
     allow_reuse_address = True
+    # daemon_threads: request threads must never outlive the server. A browser keep-alive
+    # connection (idle tab) parks its handler thread in recv; with non-daemon threads (the
+    # ThreadingHTTPServer default) a ctrl-c'd/crashed-out process then HANGS on thread join --
+    # invisibly alive and still holding the port. Daemon threads die with the process.
+    daemon_threads = True
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -680,4 +685,9 @@ def serve(handler: "type[Handler]", port: int, open_browser: bool) -> None:
     print(f"from another machine: ssh -L {port}:localhost:{port} {socket.gethostname()}", flush=True)
     if open_browser:
         webbrowser.open(url)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped", flush=True)
+    finally:
+        server.server_close()  # release the listener even when serve_forever raised

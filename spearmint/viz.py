@@ -343,9 +343,10 @@ def page(*sections: str, title: str = "report", refresh: "int | None" = None) ->
     body = "".join(f'<div class="sect" id="sect{i}">{s}</div>' for i, s in enumerate(sections))
     runtime = _RUNTIME_JS.replace("__INTERVAL__", str(refresh or 0))
     _ids = itertools.count()  # plot ids restart per page, so re-renders line up island-for-island
+    live = ' data-live="1"' if refresh else ""  # backslash-free: 3.11 f-strings reject \ in expressions
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f"<title>{_html.escape(title)}</title>{_PLOT_CDN}<style>{_STYLE}</style></head>"
-            f'<body{" data-live=\"1\"" if refresh else ""}><h1>{_html.escape(title)}</h1>{body}'
+            f"<body{live}><h1>{_html.escape(title)}</h1>{body}"
             f'<div id="viewer"><div class="hint">scroll = zoom · drag = pan · arrows = walk the '
             f'grid · Esc / click background = close</div><img id="viewer_img"/></div>'
             f"<script>{_LIGHTBOX_JS}</script><script>{runtime}</script></body></html>")
