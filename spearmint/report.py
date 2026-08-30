@@ -35,6 +35,7 @@ class JobRow:
     started_at: str
     ended_at: "str | None"
     total: timedelta
+    avg: timedelta  # total / n_runs -- typical wall clock of ONE attempt
     stale: "list[str] | None"  # None = provenance unknown (run not launched by dagrunner)
 
 
@@ -64,6 +65,7 @@ def collect() -> "dict[str, list[JobRow]]":
             started_at=started,
             ended_at=ended,
             total=totals[job_key],
+            avg=totals[job_key] / counts[job_key],
             stale=rundb.stale_inputs(job_key),
         )
         groups.setdefault(job_key.split("/")[0], []).append(row)
@@ -83,9 +85,10 @@ def render(groups: "dict[str, list[JobRow]]") -> str:
             status = f"wip({r.lsf_state})" if r.status == "wip" and r.lsf_state else r.status
             stale = "n/a" if r.stale is None else (f"yes: {','.join(r.stale)}" if r.stale else "no")
             total = str(r.total).split(".")[0]  # a live (wip) total carries microseconds; drop them
+            avg = str(r.avg).split(".")[0]
             lines.append(
                 f"  {r.job_key:<40} {status:<16} runs={r.n_runs:<3} "
-                f"total={total:<10} last={fmt_ts(r.started_at)}  stale={stale}"
+                f"total={total:<10} avg={avg:<10} last={fmt_ts(r.started_at)}  stale={stale}"
             )
         lines.append("")
     return "\n".join(lines).rstrip()
@@ -149,10 +152,11 @@ def render_html(
             f' <span class="mark">{report_link(r, "📈" + r.split("/", 1)[1])}</span>'
             for r in sorted(reports) if r.startswith(f"{group}/")
         )
-        rows.append(f'<tr class="group"><td colspan="6">{head}</td></tr>')
+        rows.append(f'<tr class="group"><td colspan="7">{head}</td></tr>')
         for r in sorted(groups[group], key=lambda r: r.job_key):
             stale = "n/a" if r.stale is None else (f"yes: {', '.join(r.stale)}" if r.stale else "no")
             total = str(r.total).split(".")[0]
+            avg = str(r.avg).split(".")[0]
             key_link = f'/run/{quote(r.job_key)}'  # job_key slashes are real path structure
             have = kinds.get(r.job_key, set())
             marks = "".join(CONTENT_SYMBOLS[k] for k in CONTENT_SYMBOLS if k in have)
@@ -166,12 +170,13 @@ def render_html(
                 f"<td>{badge}</td>"
                 f"<td>{r.n_runs}</td>"
                 f"<td>{total}</td>"
+                f"<td>{avg}</td>"
                 f"<td>{fmt_ts(r.started_at)}</td>"
                 f'<td class="stale">{html.escape(stale)}</td>'
                 "</tr>"
             )
     header = (
-        "<tr><th>stage</th><th>status</th><th>runs</th><th>total</th>"
+        "<tr><th>stage</th><th>status</th><th>runs</th><th>total</th><th>avg</th>"
         "<th>last</th><th>stale</th></tr>"
     )
     return f"<table>{header}{''.join(rows)}</table>"
