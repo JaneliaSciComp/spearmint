@@ -71,8 +71,10 @@ def lines(
     traces: "list[dict]" = []
     facet_vals: "list" = []  # first-seen order, shared across series so facets align
     for label, rows in series.items():
-        cols = list(rows[0]) if rows else []
-        numeric = [c for c in cols if c != x and any(_num(r.get(c)) is not None for r in rows[:50])]
+        # Union over all rows, first-seen order: interleaved logs (train rows + sparse val
+        # rows) mean rows[0]'s keyset alone misses late-appearing series like val_loss.
+        cols = list(dict.fromkeys(c for r in rows for c in r))
+        numeric = [c for c in cols if c != x and any(_num(r.get(c)) is not None for r in rows)]
         ys = numeric if y_pats is None else \
             list(dict.fromkeys(c for p in y_pats for c in numeric if fnmatch(c, p)))
         for fval, frows in ({None: rows} if facet is None else _partition(rows, facet)).items():
@@ -82,9 +84,14 @@ def lines(
                 for yc in ys:
                     d = next((v for p, v in (dash or {}).items() if fnmatch(yc, p)), "solid")
                     fi = facet_vals.index(fval) if facet is not None else 0
+                    # Drop rows where this series is absent: a sparse series (val_* logged
+                    # every N epochs) draws as one connected line, not null-broken fragments.
+                    xs = [r.get(x) for r in grows] if x else list(range(len(grows)))
+                    pts = [(xv, yv) for xv, yv in zip(xs, (_num(r.get(yc)) for r in grows))
+                           if yv is not None]
                     traces.append({
-                        "x": [r.get(x) for r in grows] if x else list(range(len(grows))),
-                        "y": [_num(r.get(yc)) for r in grows],
+                        "x": [xv for xv, _ in pts],
+                        "y": [yv for _, yv in pts],
                         "name": " · ".join(str(v) for v in (label, yc, gval) if v not in (None, "")),
                         "mode": "lines",
                         "line": {"dash": d, "color": _PALETTE[len(traces) % len(_PALETTE)]},
