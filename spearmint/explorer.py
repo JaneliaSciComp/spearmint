@@ -354,32 +354,60 @@ def _tabular_render(label: str, cols: "list[str]", rows: "list[dict]", idx: int)
     )
 
 
+_HEXISH = re.compile(r"^(?=.*[0-9])(?=.*[a-f])[0-9a-f]{8,}$")  # wandb-style content hashes
+
+
 def _infer_image_dims(pngs: "list[Path]", base: Path) -> "tuple[list[dict], list[dict]]":
-    """Factor a set of PNG filenames into navigable dimensions. Each numeric-labelled token
-    (``z10500`` -> dim "z" = 10500) becomes a numeric dimension; the digit-stripped stem
-    (``mae_probability_z``) is the categorical "series" dimension. Returns (dims, images) where
-    dims is [{name, values(sorted)}] keeping only dimensions that actually vary, and images is
-    [{src, name, coord}] with coord placing each image in that space -- the client looks an
-    image up by coordinate as you scrub (see _IMAGE_JS)."""
+    """Factor a set of PNG filenames into navigable dimensions, per UNDERSCORE/HYPHEN SEGMENT
+    of the stem (a global letters+digits regex mis-parsed wandb media names like
+    ``val_inout0_22_70b10ba9743f8e7550c5``: the content hash became garbage dims, the bare
+    ``22`` -- the real index -- was invisible, and hash residue made every file its own
+    series). Per segment: ``z10500``/``sample0`` -> named numeric dim; a BARE number
+    (``22``) -> positional dim n1/n2/...; a hex-ish hash -> dropped (opaque); anything else
+    joins the categorical "series" key. Files whose coords still collide (same name, different
+    hash = wandb versions) get a tie-break dim "v". Returns (dims, images): dims is
+    [{name, values(sorted)}] keeping only dimensions that vary; images is [{src, name, coord}]
+    -- the client looks an image up by coordinate as you scrub (see _IMAGE_JS)."""
     images: "list[dict]" = []
-    label_vals: "dict[str, set[int]]" = {}
+    dim_vals: "dict[str, set]" = {}
     series_vals: "set[str]" = set()
     for p in pngs:
-        stem = p.stem
         coord: "dict[str, object]" = {}
-        for label, num in _NUM_LABEL.findall(stem):
-            coord[label] = int(num)
-            label_vals.setdefault(label, set()).add(int(num))
-        series = re.sub(r"\d+", "", stem)  # digit-stripped -> the categorical series key
-        coord["series"] = series
-        series_vals.add(series)
+        series_parts: "list[str]" = []
+        n_seen = 0
+        for seg in re.split(r"[_\-]+", p.stem):
+            m = _NUM_LABEL.fullmatch(seg)
+            if seg.isdigit():
+                n_seen += 1
+                coord[f"n{n_seen}"] = int(seg)
+            elif m is not None:
+                coord[m.group(1)] = int(m.group(2))
+            elif _HEXISH.match(seg):
+                pass  # opaque content hash: not a dim, not series -- versions tie-broken below
+            elif seg:
+                series_parts.append(seg)
+        coord["series"] = "_".join(series_parts)
+        series_vals.add(coord["series"])
+        for k, v in coord.items():
+            if k != "series":
+                dim_vals.setdefault(k, set()).add(v)
         images.append({"src": quote(str(p.resolve().relative_to(base))), "name": p.name, "coord": coord})
+    # Tie-break collisions (e.g. wandb re-logging the same panel: identical coords, new hash):
+    # an extra "v" dim indexing the collision group, so every file stays reachable.
+    groups: "dict[tuple, list[dict]]" = {}
+    for im in images:
+        groups.setdefault(tuple(sorted(im["coord"].items())), []).append(im)
+    if any(len(g) > 1 for g in groups.values()):
+        for g in groups.values():
+            for i, im in enumerate(sorted(g, key=lambda im: im["name"])):
+                im["coord"]["v"] = i
+                dim_vals.setdefault("v", set()).add(i)
     dims: "list[dict]" = []
     if len(series_vals) > 1:
         dims.append({"name": "series", "values": sorted(series_vals)})
-    for label in sorted(label_vals):
-        if len(label_vals[label]) > 1:
-            dims.append({"name": label, "values": sorted(label_vals[label])})
+    for label in sorted(dim_vals):
+        if len(dim_vals[label]) > 1:
+            dims.append({"name": label, "values": sorted(dim_vals[label])})
     return dims, images
 
 
