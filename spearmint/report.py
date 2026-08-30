@@ -81,7 +81,12 @@ def render(groups: "dict[str, list[JobRow]]") -> str:
     lines: "list[str]" = []
     for group in sorted(groups):
         lines.append(group)
+        prev_sub = None
         for r in sorted(groups[group], key=lambda r: r.job_key):
+            sub = "/".join(r.job_key.split("/")[:-1])
+            if prev_sub is not None and sub != prev_sub:
+                lines.append("")  # blank line between sub-experiments (e00/short vs e00/smoke)
+            prev_sub = sub
             status = f"wip({r.lsf_state})" if r.status == "wip" and r.lsf_state else r.status
             stale = "n/a" if r.stale is None else (f"yes: {','.join(r.stale)}" if r.stale else "no")
             total = str(r.total).split(".")[0]  # a live (wip) total carries microseconds; drop them
@@ -153,7 +158,14 @@ def render_html(
             for r in sorted(reports) if r.startswith(f"{group}/")
         )
         rows.append(f'<tr class="group"><td colspan="7">{head}</td></tr>')
+        prev_sub = None
         for r in sorted(groups[group], key=lambda r: r.job_key):
+            # A vertical break where the SUB-experiment prefix changes (e00/short -> e00/smoke)
+            # -- adjacent tiers otherwise read as one experiment. The class also delimits the
+            # client-side sort segments (see dashboard's sort script).
+            sub = "/".join(r.job_key.split("/")[:-1])
+            brk = ' class="subbreak"' if prev_sub is not None and sub != prev_sub else ""
+            prev_sub = sub
             stale = "n/a" if r.stale is None else (f"yes: {', '.join(r.stale)}" if r.stale else "no")
             total = str(r.total).split(".")[0]
             avg = str(r.avg).split(".")[0]
@@ -165,7 +177,7 @@ def render_html(
             if r.status == "failed":  # click the red badge -> the err log
                 badge = f'<a href="/file/{quote(lsf_log_relpath(r.job_key))}">{badge}</a>'
             rows.append(
-                "<tr>"
+                f"<tr{brk}>"
                 f'<td class="key"><a href="{key_link}">{html.escape(r.job_key)}</a>{mark}</td>'
                 f"<td>{badge}</td>"
                 f"<td>{r.n_runs}</td>"

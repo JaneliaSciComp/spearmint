@@ -43,6 +43,66 @@ _STYLE = """
   .skipped { background: #6e7681; } .abandoned { background: #30363d; color: #c9d1d9; }
   pre { background: #161b22; border: 1px solid #30363d; padding: 10px; overflow-x: auto; border-radius: 6px; }
   pre.err { color: #ffa198; }
+  tr.subbreak td { padding-top: 18px; }  /* vertical break between sub-experiments (e00/short | e00/smoke) */
+  th { cursor: pointer; user-select: none; }
+"""
+
+# Click a column header -> sort by it (toggle direction, ▲/▼ sigil on the active header).
+# Rows sort WITHIN their blocks -- group rows and subbreak rows delimit segments, so
+# experiments and sub-experiment tiers never intermix; the subbreak spacing is re-pinned to
+# each block's new first row. State lives in JS globals and re-applies after every /table
+# swap (pull() calls spSort). Built as a plain string (no f-string brace doubling).
+_SORT_JS = """
+(function(){
+  var sortCol = null, sortDir = 1;
+  function key(td){
+    var t = td.textContent.trim();
+    var m = t.match(/^(?:(\\d+) days?, )?(\\d+):(\\d\\d):(\\d\\d)$/);  // timedelta strings
+    if (m) return ((+m[1] || 0) * 86400) + (+m[2]) * 3600 + (+m[3]) * 60 + (+m[4]);
+    if (t !== "" && !isNaN(+t)) return +t;
+    return t.toLowerCase();
+  }
+  function apply(){
+    var table = document.querySelector("#table table");
+    if (!table) return;
+    table.querySelectorAll("th").forEach(function(th, i){
+      th.textContent = th.textContent.replace(/ [▲▼]$/, "");
+      if (i === sortCol) th.textContent += sortDir > 0 ? " ▲" : " ▼";
+      th.onclick = function(){
+        sortDir = (sortCol === i) ? -sortDir : 1;
+        sortCol = i;
+        apply();
+      };
+    });
+    if (sortCol === null) return;
+    var rows = Array.prototype.filter.call(table.querySelectorAll("tr"),
+                                           function(r){ return !r.querySelector("th"); });
+    var groups = [];
+    rows.forEach(function(r){
+      if (r.classList.contains("group")) { groups.push({header: r, blocks: [[]]}); return; }
+      if (!groups.length) groups.push({header: null, blocks: [[]]});
+      var g = groups[groups.length - 1];
+      if (r.classList.contains("subbreak") && g.blocks[g.blocks.length - 1].length) g.blocks.push([]);
+      g.blocks[g.blocks.length - 1].push(r);
+    });
+    var body = table.tBodies[0] || table;
+    groups.forEach(function(g){
+      if (g.header) body.appendChild(g.header);
+      g.blocks.forEach(function(block, bi){
+        block.sort(function(a, b){
+          var ka = key(a.cells[sortCol]), kb = key(b.cells[sortCol]);
+          return (ka < kb ? -1 : ka > kb ? 1 : 0) * sortDir;
+        });
+        block.forEach(function(r, ri){
+          r.classList.toggle("subbreak", bi > 0 && ri === 0);
+          body.appendChild(r);
+        });
+      });
+    });
+  }
+  window.spSort = apply;
+  apply();
+})();
 """
 
 _REFRESH_SCRIPT = f"""<script>
@@ -51,6 +111,7 @@ async function pull() {{
   document.getElementById('table').innerHTML = await r.text();
   document.getElementById('meta').textContent =
     'updated ' + new Date().toLocaleTimeString() + ' ({REFRESH_SECONDS}s refresh)';
+  window.spSort && window.spSort();  // re-apply the active column sort + sigil after the swap
 }}
 setInterval(pull, {REFRESH_SECONDS} * 1000);
 </script>"""
@@ -66,6 +127,7 @@ def _page(body: str, live: bool, title: str = "spearmint") -> str:
 <h1>{html.escape(title)}</h1>
 {meta}
 <div id="table">{body}</div>
+<script>{_SORT_JS}</script>
 {_REFRESH_SCRIPT if live else ""}</body></html>"""
 
 
