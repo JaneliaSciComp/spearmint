@@ -12,6 +12,7 @@ freely mixable per experiment file. See examples/toy_aio_sidecar.py.
 """
 
 import asyncio
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -137,16 +138,17 @@ class Experiment:
             f"list item, e.g. ['uv', 'run', 'python']"
         )
         self.stages: "list[Stage]" = []
-        # Optional report renderer: a plain function ``fn(savedir) -> html`` (build it with
-        # spearmint.viz; ``savedir`` is self.savedir below, so partial runs render too) -- OR
-        # a ``"path/to/report_fn.py:make_report"`` spec, hot-reloaded on file change so the
-        # report code is editable WHILE a long run executes (see _load_report_fn). The
-        # scheduler re-runs it after every stage finalize, every REPORT_TICK_SECONDS while
-        # anything is running, and once at DAG end, writing ROOT/_reports/<prefix>/report.html
-        # (linked from the status table). A raising report renders as a printed error -- it
-        # can never fail or delay a stage.
+        # Optional report renderer, re-run by the scheduler after every stage finalize, every
+        # REPORT_TICK_SECONDS while anything is running, and once at DAG end. THE pattern is a
+        # STANDALONE SCRIPT path ("my_report.py"): the driver shells out to it (under this
+        # experiment's cmd_prefix, so the project env), and the same file runs by hand --
+        # during a run, after it, or a week later with new report code; every render is a
+        # fresh process, so editing it mid-run just works. Build it with spearmint.load +
+        # spearmint.viz and write ROOT/_reports/<name>/report.html (linked from the status
+        # table). A plain function ``fn(savedir) -> html`` also works for one-file demos
+        # (written to _reports/<prefix>/report.html for you) but is fixed for the run's
+        # lifetime. Either way a failing render prints and the DAG carries on.
         self.report: "Callable[[Callable], str] | str | None" = None
-        self._report_mod: "tuple[float, object] | None" = None  # (mtime, module) reload cache
 
     def Stage(
         self,
@@ -195,35 +197,18 @@ class Experiment:
         assert s is not None, f"no stage named {stage!r} in experiment {self.prefix!r}"
         return rundb.latest_outdir(s.job_key, status="done")
 
-    def _load_report_fn(self, spec: str):
-        """``"path/to/report_fn.py:make_report"`` -- the module is re-executed whenever the
-        FILE's mtime changes, so report code is editable WHILE a long experiment runs: save
-        the file, the next tick (or finalize) renders with the new code; a broken save hits
-        run_experiment's [report] guard (loud print, DAG untouched) and heals on the next
-        save. The module must be import-side-effect-free -- in particular it must not build
-        Experiments (its report fn resolves stages BY NAME via savedir()/the ledger, not by
-        closing over Stage objects). Path is cwd-relative: the repo root the driver runs from."""
-        import importlib.util
-
-        pathstr, fnname = spec.rsplit(":", 1)
-        path = Path(pathstr)
-        mtime = path.stat().st_mtime
-        if self._report_mod is None or self._report_mod[0] != mtime:
-            modspec = importlib.util.spec_from_file_location(
-                f"_spearmint_report_{self.prefix.replace('/', '_')}", path)
-            assert modspec is not None and modspec.loader is not None, f"can't load {spec!r}"
-            mod = importlib.util.module_from_spec(modspec)
-            modspec.loader.exec_module(mod)
-            self._report_mod = (mtime, mod)
-            print(f"[report] loaded {spec}", flush=True)
-        return getattr(self._report_mod[1], fnname)
-
     def _render_report(self) -> None:
         assert self.report is not None
-        fn = self._load_report_fn(self.report) if isinstance(self.report, str) else self.report
+        if isinstance(self.report, str):
+            # Fresh process per render: the script picks up its own edits, its stderr flows
+            # through the driver's log, and a hang can't wedge the scheduler (generous cap --
+            # a report is file reads + HTML). check=True routes failure into run_experiment's
+            # [report] guard.
+            subprocess.run([*self.cmd_prefix, self.report], check=True, timeout=600)
+            return
         out = Path(rundb.root()) / rundb.REPORTS_DIR / self.prefix
         out.mkdir(parents=True, exist_ok=True)
-        (out / "report.html").write_text(fn(self.savedir))
+        (out / "report.html").write_text(self.report(self.savedir))
 
     def main(self, argv: "list[str] | None" = None) -> "dict[str, str] | None":
         """The standard experiment-file entrypoint -- spearmint's own flags, parsed explicitly
