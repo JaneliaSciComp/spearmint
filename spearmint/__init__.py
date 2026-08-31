@@ -11,6 +11,7 @@ Importing spearmint has no side effects -- no config files, no env vars, no git:
 location is anchored at first use (see rundb.anchor), so these are plain imports."""
 
 from . import dagrunner
+from . import load
 from . import rundb
 from .dagrunner import Config, Experiment, Stage, closure, run_experiment
 from .rundb import run
