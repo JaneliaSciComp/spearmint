@@ -121,3 +121,69 @@ Open questions before deciding:
 - Does anything today depend on extend's stable paths (external scripts, tensorboard)?
 - What does gc look like under B -- age-based? keep-last-N per job_key? Who runs it?
 - Ledger schema: does a run need a `seeded_from` column for provenance under B?
+
+## Related: folders as the record vs a central metrics database
+
+The dir-vs-dir question above assumes the run DIRECTORY is where metrics, curves, and PNGs
+live at all. The alternative worth naming: a central database records everything -- every
+metric point, every image -- and dirs hold only bulk artifacts (checkpoints, zarrs). This is
+the wandb/mlflow model. Spearmint is already a hybrid (rundb.db for run METADATA, files for
+everything else), so the real question is where the line sits.
+
+### What folders buy
+
+- **Schema changes are free.** metrics.jsonl has no schema: a new metric is a new key on the
+  next line; a renamed one just starts appearing. Old runs keep their old shape and stay
+  readable forever -- viz.lines already does column-union + per-series drop-missing for
+  exactly this reason. A central db needs migrations, or an EAV/key-value table
+  (`run, step, name, value`)... which is jsonl with more ceremony. ML metric schemas churn
+  every week of a project; this is the folder model's strongest card.
+- **No writer contention.** 200 array jobs each append to their own file. A central sqlite on
+  GPFS/NFS is single-writer with network-fs locking -- we already dodged this once: only the
+  DRIVER writes rundb.db, workers get env identity, precisely because concurrent sqlite over
+  network filesystems is a known hazard. Central metrics would put every training step's
+  write on that path (or force a collector service, see below).
+- **Unix tooling and zero-dependency debugging.** `tail -f metrics.jsonl`, `ls`, `rsync`,
+  `open *.png` all work with spearmint absent or broken. A db needs the tool alive and a
+  query language to answer "what did this run even produce?"
+- **Locality and lifecycle alignment.** The curve sits next to the checkpoint and stderr that
+  produced it; a run dir is self-describing; `rm -rf` (or gc) deletes a run and its record
+  agrees with itself. Central db + dirs means two lifecycles to keep in sync -- delete the
+  dir and the db still claims the PNGs exist, or vice versa.
+- **Failure isolation.** A torn jsonl line loses one line of one run (readers skip it). A
+  corrupted central db loses the record of every experiment you've ever run.
+- **Composes with trees that already exist.** explorer's plain mode browses ANY nested output
+  dir -- wandb dumps, tensorboard logs, a collaborator's ad-hoc tree -- with zero ingestion.
+  A db renders only what was ingested through its API; everything else is invisible.
+- **PNGs in a db are blobs**: you pay db bloat AND still extract to view. Nobody wins.
+
+### What a central db buys
+
+- **Cross-run queries.** "min val_loss over all runs where lr < 1e-3, grouped by
+  augmentation" is one SQL statement. Folder-based means walking N dirs and parsing N files.
+- **Hyperparam searches are the pressure point.** At 500 trials, "sort by final val_loss"
+  against 500 summary.json files means 500 opens per dashboard render. This is the one
+  workload where the folder model degrades measurably -- though note it's the small
+  SUMMARIES you need indexed, never the per-step curves or PNGs (you look at curves a few
+  runs at a time, always).
+- **Uniform schema enables generic UIs** -- parallel coordinates, run tables sortable by any
+  metric. But observe what wandb actually does under the hood: schemaless key-value logging,
+  i.e. jsonl-in-a-db. The generic UI comes from the key-value shape, not from centralism.
+- **Point atomicity / consistency** vs torn writes. Real but small: single-line jsonl appends
+  are effectively atomic, and readers that skip a bad trailing line (ours do) close the gap.
+- **A service-backed db** (wandb, mlflow server) additionally buys multi-user and web access
+  -- and is flatly out: spearmint's invariants are stdlib-only, no services, workers stay
+  plain. A serverless central sqlite avoids the service but inherits the writer-contention
+  problem above.
+
+### Where the line should sit (lean)
+
+The current split is close to right and is itself the answer: a small central db for the
+RELATIONAL CORE with a stable, spearmint-owned schema (runs, status, argv, commits,
+staleness -- rundb.db), files for everything whose schema the USER owns and churns (metrics,
+images, tables). The one genuine gap is hyperparam-search-scale summary queries, and the fix
+is an INDEX, not a migration: at finalize, the driver (already the sole db writer) copies
+summary.json key-values into a ledger table. It's a derived cache -- files remain the truth,
+old runs backfill by re-scan, a dropped table costs nothing. That captures the db's only
+killer feature without giving up schema freedom, unix debuggability, or the plain-worker
+invariant.
