@@ -175,6 +175,13 @@ everything else), so the real question is where the line sits.
   -- and is flatly out: spearmint's invariants are stdlib-only, no services, workers stay
   plain. A serverless central sqlite avoids the service but inherits the writer-contention
   problem above.
+- **DuckDB doesn't escape this either.** It FORBIDS multi-process writes outright (one
+  read-write process, enforced by an exclusive file lock at open) -- so concurrent worker
+  writes aren't slow, they're impossible -- and that lock rides the same unreliable
+  NFS/lockd semantics that corrupt sqlite; DuckDB's own docs warn off network filesystems.
+  Plus it's a real dependency (sqlite3 is stdlib). Its genuine niche here would be
+  READ-side: a report script querying the folder truth in place
+  (read_json_auto('**/metrics.jsonl')) as a project-side tool, no central db at all.
 
 ### Where the line should sit (lean)
 
