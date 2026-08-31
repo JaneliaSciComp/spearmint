@@ -187,3 +187,56 @@ summary.json key-values into a ledger table. It's a derived cache -- files remai
 old runs backfill by re-scan, a dropped table costs nothing. That captures the db's only
 killer feature without giving up schema freedom, unix debuggability, or the plain-worker
 invariant.
+
+## Related: driver-driven auto-updating reports vs render-on-demand
+
+Today the DRIVER renders the report -- at start, after every finalize, every
+REPORT_TICK_SECONDS while stages run, once at the end -- into a static
+`_reports/<prefix>/report.html`. The alternative: build the report only when someone asks
+(the browse server renders on page load, or a CLI verb builds it).
+
+### What driver-driven buys
+
+- **The viewer stays dumb -- this is the invariant doing the deciding.** A report fn is
+  arbitrary user code. On-demand rendering inside `spearmint browse` means the viewer
+  executes project code, which we've ruled out from day one: the viewer must be able to
+  browse ANY tree (yours, a collaborator's, a half-deleted one) without an env, without
+  imports, without crashing. The driver, by contrast, already runs the user's code by
+  definition -- rendering there adds no new trust or dependency surface.
+- **The output is a static file.** Serve it with anything, rsync it, mail it, open it after
+  the driver -- and the whole cluster allocation -- is gone. On-demand needs the project env
+  (uv, imports, GPU-node paths) alive AT VIEW TIME, which on a cluster is exactly when you
+  don't have it.
+- **It exists from the first second and survives crashes.** The all-waiting skeleton renders
+  before any stage starts; whatever the driver managed to render is what you have if the run
+  dies. A demand-built report of a crashed run needs someone to run something.
+- **Liveness knowledge is free.** The driver KNOWS a stage just finalized and re-renders that
+  instant; on-demand either polls the ledger to fake this or is stale in the way that
+  matters most (the moment results land).
+- **Failure containment is already built**: a raising report fn prints
+  `[report] render failed` and the DAG carries on. On-demand inside the viewer would turn a
+  report bug into a dashboard outage.
+
+### What on-demand buys
+
+- **Zero wasted renders.** The driver re-renders every tick whether anyone is watching or
+  not. Mostly moot: renders are cheap (read small files, emit HTML), the tick default is
+  120s, and the cost lands on the driver process which is idle-waiting anyway.
+- **Never stale at view time.** Auto-updating is stale up to one tick; on-demand is stale by
+  zero. In practice the page's own refresh/poll (already built: fetch + Plotly.react +
+  uirevision) hides the difference.
+- **Rebuilding reports for FINISHED experiments.** The real advantage. You improve the report
+  fn a week later and want yesterday's experiment re-rendered -- driver-driven has no
+  standing process to do it.
+
+### Why the current design already contains on-demand
+
+Re-running the experiment script IS the demand-render: with everything done, every stage
+skips as fresh and the driver does exactly one final render and exits -- seconds of ledger
+checks, no compute. `python e00.py` = "rebuild my report". It runs in the project env by
+construction, honors the same report spec (including the hot-reload `path.py:fn` form), and
+keeps both invariants intact: viewer never executes project code, CLI stays viewing-only.
+So the trade collapses: driver-driven while alive for liveness and crash-residue, degenerate
+re-run for after-the-fact rebuilds. The only thing worth adding if this ever chafes is a
+`--report-only` flag that skips even the skip-checks -- and we should wait until someone
+actually asks.
