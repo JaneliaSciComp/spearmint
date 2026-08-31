@@ -175,12 +175,17 @@ everything else), so the real question is where the line sits.
   -- and is flatly out: spearmint's invariants are stdlib-only, no services, workers stay
   plain. A serverless central sqlite avoids the service but inherits the writer-contention
   problem above.
-- **DuckDB doesn't escape this either.** It FORBIDS multi-process writes outright (one
-  read-write process, enforced by an exclusive file lock at open) -- so concurrent worker
-  writes aren't slow, they're impossible -- and that lock rides the same unreliable
-  NFS/lockd semantics that corrupt sqlite; DuckDB's own docs warn off network filesystems.
-  Plus it's a real dependency (sqlite3 is stdlib). Its genuine niche here would be
-  READ-side: a report script querying the folder truth in place
+- **DuckDB doesn't escape this either.** At the FILE level it forbids multi-process writes
+  outright (one read-write process, enforced by an exclusive file lock at open) -- and that
+  lock rides the same unreliable NFS/lockd semantics that corrupt sqlite; DuckDB's own docs
+  warn off network filesystems. DuckDB 2.0 (2026-08) adds the answer it chose instead: a
+  client/server mode ("quack protocol" -- `CALL quack_serve(...)`, clients
+  `ATTACH 'quack:host'`), i.e. concurrent workers CAN write -- through a daemon. That moves
+  it from the serverless bucket into the service bucket already rejected above: a server
+  whose node/port/discovery/lifetime someone must manage, dying mid-experiment under 200
+  workers -- the distsys machinery we deleted. Plus it's a real dependency (sqlite3 is
+  stdlib). Its genuine niche here is READ-side, and 2.0 strengthens it (async I/O, VARIANT
+  type suits jsonl-shaped metrics): a report script querying the folder truth in place
   (read_json_auto('**/metrics.jsonl')) as a project-side tool, no central db at all.
 
 ### Where the line should sit (lean)
