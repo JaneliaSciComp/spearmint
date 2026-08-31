@@ -116,6 +116,57 @@ def _status_class(r: JobRow) -> str:
     return _status_class_for(r.status, r.lsf_state)
 
 
+def _spark(vals: "list[float]") -> str:
+    """Unicode histogram (8 bins over the value range, bar height = bin count) -- the
+    collapsed group row's at-a-glance distribution. No spread -> no distribution -> ''."""
+    bars = "▁▂▃▄▅▆▇█"
+    lo, hi = min(vals), max(vals)
+    if hi == lo:
+        return ""
+    bins = [0] * 8
+    for v in vals:
+        bins[min(7, int((v - lo) / (hi - lo) * 8))] += 1
+    m = max(bins)
+    return "".join(bars[round(b * 7 / m)] for b in bins)
+
+
+def _fmt_td(td: timedelta) -> str:
+    return str(td).split(".")[0]  # live (wip) durations carry microseconds; drop them
+
+
+def _agg_row_html(group: str, rs: "list[JobRow]") -> str:
+    """One collapsed-view row aggregating a group's stages, cells aligned with the detail
+    columns: stage count, status-count badges, summed runs/total, mean attempt duration with
+    a per-stage-avg histogram (min/max ride the tooltips), newest activity, stale count."""
+    import html
+    from collections import Counter
+
+    counts = Counter(_status_class(r) for r in rs)
+    badges = " ".join(
+        f'<span class="badge {c}" title="{c}">{counts[c]}</span>'
+        for c in ("done", "run", "pend", "failed", "skipped", "abandoned") if counts[c]
+    )
+    total = sum((r.total for r in rs), timedelta())
+    avg = total / sum(r.n_runs for r in rs)  # mean over ATTEMPTS -- same semantics as the avg column
+    avgs = sorted(r.avg.total_seconds() for r in rs)
+    spark = f' <span class="mark">{_spark(avgs)}</span>' if len(rs) >= 4 else ""
+    totals = sorted(r.total for r in rs)
+    n_stale = sum(1 for r in rs if r.stale)
+    stale = "n/a" if all(r.stale is None for r in rs) else (f"{n_stale} stale" if n_stale else "no")
+    return (
+        f'<tr class="agg" data-grp="{html.escape(group, quote=True)}">'
+        f'<td class="key">{len(rs)} stages</td>'
+        f"<td>{badges}</td>"
+        f"<td>{sum(r.n_runs for r in rs)}</td>"
+        f'<td title="per stage: min {_fmt_td(totals[0])} · max {_fmt_td(totals[-1])}">{_fmt_td(total)}</td>'
+        f'<td title="per stage: min {_fmt_td(timedelta(seconds=avgs[0]))} · max '
+        f'{_fmt_td(timedelta(seconds=avgs[-1]))}">{_fmt_td(avg)}{spark}</td>'
+        f"<td>{fmt_ts(max(r.started_at for r in rs))}</td>"
+        f'<td class="stale">{stale}</td>'
+        "</tr>"
+    )
+
+
 def lsf_log_relpath(job_key: str) -> str:
     """ROOT-relative path of a stage's LSF -oo log -- lsf.py writes it to
     _lsf_logs/{job_key with / -> _}.log. Where the driver captured the child's stdout/stderr, so
@@ -149,6 +200,9 @@ def render_html(
     def report_link(prefix: str, text: str) -> str:
         return f'<a href="/file/{quote(f"_reports/{prefix}/report.html")}">{html.escape(text)}</a>'
 
+    # One group unfolds at a time in the dashboard (see its fold script); the rest collapse
+    # to their agg row. The most recently active group is marked as the default-open one.
+    newest = max(groups, key=lambda g: max(r.started_at for r in groups[g]), default=None)
     for group in sorted(groups):
         head = html.escape(group)
         if group in reports:
@@ -157,7 +211,11 @@ def render_html(
             f' <span class="mark">{report_link(r, "📈" + r.split("/", 1)[1])}</span>'
             for r in sorted(reports) if r.startswith(f"{group}/")
         )
-        rows.append(f'<tr class="group"><td colspan="7">{head}</td></tr>')
+        grp = html.escape(group, quote=True)
+        opn = " data-open" if group == newest else ""
+        rows.append(f'<tr class="group" data-grp="{grp}"{opn}>'
+                    f'<td colspan="7"><span class="tri">▸</span> {head}</td></tr>')
+        rows.append(_agg_row_html(group, groups[group]))
         prev_sub = None
         for r in sorted(groups[group], key=lambda r: r.job_key):
             # A vertical break where the SUB-experiment prefix changes (e00/short -> e00/smoke)
@@ -177,7 +235,7 @@ def render_html(
             if r.status == "failed":  # click the red badge -> the err log
                 badge = f'<a href="/file/{quote(lsf_log_relpath(r.job_key))}">{badge}</a>'
             rows.append(
-                f"<tr{brk}>"
+                f'<tr{brk} data-grp="{html.escape(group, quote=True)}">'
                 f'<td class="key"><a href="{key_link}">{html.escape(r.job_key)}</a>{mark}</td>'
                 f"<td>{badge}</td>"
                 f"<td>{r.n_runs}</td>"

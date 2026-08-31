@@ -45,6 +45,9 @@ _STYLE = """
   pre.err { color: #ffa198; }
   tr.subbreak td { padding-top: 18px; }  /* vertical break between sub-experiments (e00/short | e00/smoke) */
   th { cursor: pointer; user-select: none; }
+  tr.group { cursor: pointer; }
+  .tri { color: #8b949e; font-weight: 400; }
+  tr.agg td { color: #8b949e; }  /* the collapsed-group aggregate row */
 """
 
 # Click a column header -> sort by it (toggle direction, ▲/▼ sigil on the active header).
@@ -79,15 +82,17 @@ _SORT_JS = """
                                            function(r){ return !r.querySelector("th"); });
     var groups = [];
     rows.forEach(function(r){
-      if (r.classList.contains("group")) { groups.push({header: r, blocks: [[]]}); return; }
-      if (!groups.length) groups.push({header: null, blocks: [[]]});
+      if (r.classList.contains("group")) { groups.push({header: r, agg: null, blocks: [[]]}); return; }
+      if (!groups.length) groups.push({header: null, agg: null, blocks: [[]]});
       var g = groups[groups.length - 1];
+      if (r.classList.contains("agg")) { g.agg = r; return; }  // rides with its header, never sorts
       if (r.classList.contains("subbreak") && g.blocks[g.blocks.length - 1].length) g.blocks.push([]);
       g.blocks[g.blocks.length - 1].push(r);
     });
     var body = table.tBodies[0] || table;
     groups.forEach(function(g){
       if (g.header) body.appendChild(g.header);
+      if (g.agg) body.appendChild(g.agg);
       g.blocks.forEach(function(block, bi){
         block.sort(function(a, b){
           var ka = key(a.cells[sortCol]), kb = key(b.cells[sortCol]);
@@ -101,7 +106,40 @@ _SORT_JS = """
     });
   }
   window.spSort = apply;
+
+  // One experiment unfolds at a time: stage rows show only for the open group; every other
+  // group shows just its aggregate row. First paint opens the server-suggested group
+  // (data-open = most recent activity); after that the user's choice is sticky across
+  // /table swaps. Clicking the open group's header folds everything.
+  var openGrp = null, openInit = false;
+  function fold(){
+    var table = document.querySelector("#table table");
+    if (!table) return;
+    if (!openInit) {
+      var d = table.querySelector("tr.group[data-open]");
+      openGrp = d ? d.dataset.grp : null;
+      openInit = true;
+    }
+    table.querySelectorAll("tr").forEach(function(r){
+      if (r.classList.contains("group")) {
+        var open = r.dataset.grp === openGrp;
+        var tri = r.querySelector(".tri");
+        if (tri) tri.textContent = open ? "▾" : "▸";
+        r.onclick = function(e){
+          if (e.target.closest("a")) return;  // report links inside the header still navigate
+          openGrp = (openGrp === r.dataset.grp) ? null : r.dataset.grp;
+          fold();
+        };
+        return;
+      }
+      if (!r.dataset.grp) return;  // the <th> header row
+      var open = r.dataset.grp === openGrp;
+      r.style.display = r.classList.contains("agg") ? (open ? "none" : "") : (open ? "" : "none");
+    });
+  }
+  window.spFold = fold;
   apply();
+  fold();
 })();
 """
 
@@ -112,6 +150,7 @@ async function pull() {{
   document.getElementById('meta').textContent =
     'updated ' + new Date().toLocaleTimeString() + ' ({REFRESH_SECONDS}s refresh)';
   window.spSort && window.spSort();  // re-apply the active column sort + sigil after the swap
+  window.spFold && window.spFold();  // re-apply which experiment is unfolded
 }}
 setInterval(pull, {REFRESH_SECONDS} * 1000);
 </script>"""
