@@ -236,7 +236,48 @@ skips as fresh and the driver does exactly one final render and exits -- seconds
 checks, no compute. `python e00.py` = "rebuild my report". It runs in the project env by
 construction, honors the same report spec (including the hot-reload `path.py:fn` form), and
 keeps both invariants intact: viewer never executes project code, CLI stays viewing-only.
-So the trade collapses: driver-driven while alive for liveness and crash-residue, degenerate
-re-run for after-the-fact rebuilds. The only thing worth adding if this ever chafes is a
-`--report-only` flag that skips even the skip-checks -- and we should wait until someone
-actually asks.
+
+### The convergence: the report IS a standalone script (updated lean)
+
+Coleman's actual pain: changing the report's STRUCTURE during a run. The hot-reload spec
+addresses the narrow form (edit the fn file, next tick re-executes the module), but it drags
+machinery and discipline with it: importlib + mtime tracking in the driver, the
+"import-side-effect-free, resolve stages by name" contract, and the report is still tethered
+to one driver and one experiment.
+
+Flip it: the report is a plain script that builds static HTML.
+
+    python my_report.py        # reads ledger + run dirs, writes _reports/<name>/report.html
+
+- **It works with the viewer by construction** -- browse serves static files; it never knew
+  who wrote them. The invariant holds without effort.
+- **Live editing is trivial and total.** Each build is a fresh process: change anything --
+  structure, panels, which experiments it covers -- no reload semantics, no import
+  discipline, no mtime dance. Run it in a `watch`/entr loop during a run if you want
+  continuous; the already-built page poller (fetch + Plotly.react + uirevision) hot-swaps the
+  new HTML into the open tab regardless of who wrote the file.
+- **Cross-run and cross-EXPERIMENT aggregation gets a home.** A driver renders its own
+  prefix; a hyperparam sweep or an A-vs-B across experiments has no single driver. A
+  standalone script reads whatever it wants.
+- **After-the-fact rebuilds are the same command**, not a degenerate re-run.
+
+What it costs: the driver's freshness triggers (render at finalize-instant, crash residue,
+exists-from-first-second). But the two models UNIFY instead of competing: let
+`e.report = "my_report.py"` mean the driver SHELLS OUT to the script on the same triggers
+(start/finalize/tick/end). One artifact, two invokers. This is strictly simpler than what we
+just built -- fresh process per render kills the importlib/mtime machinery AND the
+import-side-effect-free contract (a `__main__` guard suffices), hot-reload becomes a
+non-feature (every render is a cold start), and the same file runs by hand mid-run when you
+want an off-cycle rebuild. Render cost is a process spawn per tick; ticks are 120s.
+
+The work that actually matters then is PRIMITIVES, not plumbing -- make the script easy to
+write:
+- viz already covers rendering: lines/table/images/note/page.
+- The gap is LOADING: ledger + files -> the dicts viz eats. Roughly: runs matching a
+  job_key glob (done/all), jsonl -> rows, summaries across N runs -> one table dict,
+  PNG stacks across N runs aligned by filename -> an images grid. Small, stdlib, read-only.
+- Convention, not config: scripts write under `_reports/<name>/` so browse links them.
+
+Open question: does the callable form of `e.report` survive, or does "report = script path,
+driver shells out" become the only spec? Lean: keep the callable for one-file toy demos,
+document the script as the real pattern.
