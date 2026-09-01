@@ -18,6 +18,7 @@ import html
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
@@ -172,15 +173,26 @@ def _page(body: str, live: bool, title: str = "spearmint") -> str:
 
 # --- ledger mode (dir has a rundb.db; rundb is anchored there) ---------------------------------
 
+# kinds_in walks a stage's outdir -- even capped it's the home page's only per-stage fs cost,
+# so cache per outdir for a minute: glyphs are hints, and each home load / refresh tick was
+# re-walking EVERY stage's dir over GPFS (seconds per load, paid again on browser-back).
+_KINDS_CACHE: "dict[str, tuple[float, set[str]]]" = {}
+
+
 def _content_kinds(job_key: str, status: str) -> "set[str]":
     """The content kinds this stage's /run page would show -- explorer.kinds_in over its latest
-    outdir, plus 'log' for a failed stage whose LSF err log exists."""
+    outdir (cached, see _KINDS_CACHE), plus 'log' for a failed stage whose LSF err log exists."""
     kinds: "set[str]" = set()
     if status == "failed" and (Path(rundb.root()) / report.lsf_log_relpath(job_key)).exists():
         kinds.add("log")
     outdir = rundb.latest_outdir(job_key)
     if outdir:
-        kinds |= explorer.kinds_in(outdir)
+        now = time.monotonic()
+        hit = _KINDS_CACHE.get(outdir)
+        if hit is None or hit[0] < now:
+            hit = (now + 60, explorer.kinds_in(outdir))
+            _KINDS_CACHE[outdir] = hit
+        kinds |= hit[1]
     return kinds
 
 
@@ -302,10 +314,9 @@ def _diff_page(query: str, ledger: bool, base: str) -> str:
     qs = parse_qs(query)
     a_param = (qs.get("a") or [""])[0]
     b_param = (qs.get("b") or [""])[0]
-    back = "<p><a href='/'>&larr; back</a></p>"
     usage = f"<p class='note'>compare two runs: {_diff_form(a_param)}</p>"
     if not a_param or not b_param:
-        return viz.page(back + usage, title="diff")
+        return viz.page(usage, title="diff")
     if ledger:
         ra, rb = _resolve_side(a_param), _resolve_side(b_param)
     else:
@@ -318,11 +329,11 @@ def _diff_page(query: str, ledger: bool, base: str) -> str:
         ra, rb = _plain(a_param), _plain(b_param)
     if ra is None or rb is None:
         bad = a_param if ra is None else b_param
-        return viz.page(back + f"<p class='note'>can't resolve {html.escape(bad)!s} "
+        return viz.page(f"<p class='note'>can't resolve {html.escape(bad)!s} "
                         f"(job_key or run dir?)</p>" + usage, title="diff")
     (dir_a, rel_a), (dir_b, rel_b) = ra, rb
     label_a, label_b = explorer._labels(rel_a, rel_b)
-    parts = [back]
+    parts = []  # viz.page's shell carries the "⌂ dashboard" home link now
     if ledger:
         row_a, row_b = _row_by_outdir(rel_a), _row_by_outdir(rel_b)
         if row_a and row_b:

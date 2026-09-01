@@ -207,9 +207,16 @@ def kinds_in(outdir: str) -> "set[str]":
     kinds: "set[str]" = set()
     if not Path(outdir).is_dir():
         return kinds
+    seen = 0
     for dirpath, dirnames, filenames in os.walk(outdir):
         dirnames[:] = [d for d in dirnames if not d.endswith(".zarr")]
         for f in filenames:
+            # Bail once every kind is present or after ~500 names: glyphs are a hint, and a
+            # big training outdir (wandb/, checkpoints) costs seconds of metadata ops on
+            # GPFS -- the dashboard home was paying that PER STAGE, PER REQUEST.
+            seen += 1
+            if seen > 500 or len(kinds) == len(set(_EXT_KIND.values())):
+                return kinds
             kind = _EXT_KIND.get(Path(f).suffix)
             if kind == "json" and _peek_char(Path(dirpath) / f) == "[":
                 kind = "table"

@@ -199,6 +199,8 @@ _STYLE = """
        padding-bottom: 3px; margin-top: 1.6rem; }
   .note { color: #8b949e; }
   .logy { float: right; color: #8b949e; font-size: 12px; cursor: pointer; user-select: none; }
+  a.home { float: right; color: #8b949e; font-size: 12px; text-decoration: none; }
+  a.home:hover { color: #c9d1d9; }
   /* native drag handle (bottom edge): the runtime's ResizeObserver replots at the new height */
   div.vizplot { resize: vertical; overflow: hidden; min-height: 120px; }
   table { border-collapse: collapse; } td, th { text-align: left; padding: 4px 12px 4px 0; }
@@ -426,9 +428,13 @@ def page(*sections: str, title: str = "report", refresh: "int | None" = None) ->
     runtime = _RUNTIME_JS.replace("__INTERVAL__", str(refresh or 0))
     _ids = itertools.count()  # plot ids restart per page, so re-renders line up island-for-island
     live = ' data-live="1"' if refresh else ""  # backslash-free: 3.11 f-strings reject \ in expressions
+    # "⌂ dashboard" -> the browse server's home when served through it (the normal path);
+    # a report opened straight off disk just has a dead muted link. Beats browser-back, which
+    # re-fetches the whole home page (this page's timers keep it out of bfcache).
+    home = '<a class="home" href="/">&#8962; dashboard</a>'
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f"<title>{_html.escape(title)}</title>{_PLOT_CDN}<style>{_STYLE}</style></head>"
-            f"<body{live}><h1>{_html.escape(title)}</h1>{body}"
+            f"<body{live}>{home}<h1>{_html.escape(title)}</h1>{body}"
             f'<div id="viewer"><div class="hint">scroll = zoom · drag = pan · arrows = walk the '
             f'grid · Esc / click background = close</div><img id="viewer_img"/></div>'
             f"<script>{_LIGHTBOX_JS}</script><script>{runtime}</script></body></html>")
