@@ -198,6 +198,7 @@ _STYLE = """
   h1 { font-size: 17px; } h2 { font-size: 14px; border-bottom: 1px solid #30363d;
        padding-bottom: 3px; margin-top: 1.6rem; }
   .note { color: #8b949e; }
+  .logy { float: right; color: #8b949e; font-size: 12px; cursor: pointer; user-select: none; }
   /* native drag handle (bottom edge): the runtime's ResizeObserver replots at the new height */
   div.vizplot { resize: vertical; overflow: hidden; min-height: 120px; }
   table { border-collapse: collapse; } td, th { text-align: left; padding: 4px 12px 4px 0; }
@@ -314,13 +315,31 @@ _RUNTIME_JS = """
     c.querySelectorAll("script[type='application/json']").forEach(function(n){ n.textContent = ""; });
     return c.innerHTML;
   }
+  // Per-plot y-scale override (click the "y: log/linear" toggle above a plot). Keyed by plot
+  // id in JS -- like the table sorts -- so it survives both live island updates and whole
+  // section swaps; the server's logy= is only the default.
+  var LOGY = {};
   function draw(){
     document.querySelectorAll("div.vizplot").forEach(function(div){
       var isl = document.getElementById(div.id + "-data");
       if (!isl) return;
       var d = JSON.parse(isl.textContent);
       if (div.dataset.userh) d.layout.height = +div.dataset.userh;  // drag-resized: keep it across live re-renders
+      var log = (div.id in LOGY) ? LOGY[div.id]
+                                 : !!(d.layout.yaxis && d.layout.yaxis.type === "log");
+      Object.keys(d.layout).forEach(function(k){  // every facet's axis flips together
+        if (/^yaxis\\d*$/.test(k)) d.layout[k].type = log ? "log" : "linear";
+      });
       Plotly.react(div.id, d.traces, d.layout, CFG);
+      var tog = document.getElementById(div.id + "-logy");
+      if (!tog) {  // (re)created after section swaps wipe it
+        tog = document.createElement("span");
+        tog.id = div.id + "-logy"; tog.className = "logy";
+        div.parentNode.insertBefore(tog, div);
+        tog.onclick = function(){ LOGY[div.id] = tog.dataset.log !== "1"; draw(); };
+      }
+      tog.dataset.log = log ? "1" : "";
+      tog.textContent = log ? "y: log" : "y: linear";
       if (!div.dataset.ro) {  // CSS resize drags the div's bottom edge; replot at the new height
         div.dataset.ro = "1";
         new ResizeObserver(function(){

@@ -72,7 +72,8 @@ STYLE = """
 _PLOT_JS = """
 (function(){
   const data = __DATA__, cols = __COLS__;
-  const xs = document.getElementById("__PID__x"), ys = document.getElementById("__PID__y");
+  const xs = document.getElementById("__PID__x"), ys = document.getElementById("__PID__y"),
+        lg = document.getElementById("__PID__log");
   const isnum = c => data.some(r => r[c] !== "" && r[c] != null && !isNaN(+r[c]));
   // Defaults must differ: x prefers a step/epoch-ish column (else the first), y the first
   // NUMERIC column that isn't x -- otherwise metrics.jsonl opened as step-vs-step.
@@ -83,11 +84,12 @@ _PLOT_JS = """
     const x = xs.value, y = ys.value;
     Plotly.newPlot("__PID__", [{x: data.map(r => r[x]), y: data.map(r => +r[y]),
         mode: "lines+markers", type: "scatter"}],
-      {margin: {t: 10, r: 10}, xaxis: {title: x}, yaxis: {title: y},
+      {margin: {t: 10, r: 10}, xaxis: {title: x},
+       yaxis: {title: y, type: lg.checked ? "log" : "linear"},
        paper_bgcolor: "#0d1117", plot_bgcolor: "#161b22", font: {color: "#c9d1d9"}},
       {displayModeBar: false});
   }
-  xs.onchange = draw; ys.onchange = draw; draw();
+  xs.onchange = draw; ys.onchange = draw; lg.onchange = draw; draw();
 })();
 """
 
@@ -347,7 +349,8 @@ def _tabular_render(label: str, cols: "list[str]", rows: "list[dict]", idx: int)
     return (
         f"<h3>{html.escape(str(label))}</h3>"
         f'<div class="ctrl">x <select id="{pid}x">{opts}</select> '
-        f'y <select id="{pid}y">{opts}</select></div>'
+        f'y <select id="{pid}y">{opts}</select> '
+        f'<label><input type="checkbox" id="{pid}log"> log y</label></div>'
         f'<div id="{pid}" class="plot"></div>'
         f'<table class="datatable"><tr>{head}</tr>{trs}</table>{note}'
         f"<script>{js}</script>"
