@@ -135,11 +135,13 @@ def lines(
             f'<script type="application/json" id="{pid}-data">{payload}</script>')
 
 
-def table(columns: "dict[str, dict]", metrics: "list[str] | None" = None, title: str = "") -> str:
+def table(columns: "dict[str, dict]", metrics: "list[str] | None" = None, title: str = "",
+          corner: str = "metric") -> str:
     """Pivoted metric table -> HTML fragment: {column label: {metric: value}} renders metric
     rows x label columns (mia-muvit's metric_table, generalized past two models). Nested dicts
     flatten to dotted keys; ``metrics``: key globs filtering AND ordering the rows (default:
-    all keys, sorted). Numbers %.4g; missing cells an en dash."""
+    all keys, sorted). ``corner``: the row-label column header -- set it when transposing
+    (rows = arms/models rather than metrics). Numbers %.4g; missing cells an en dash."""
     flat = {label: _flat(d) for label, d in columns.items()}
     all_keys = sorted({k for d in flat.values() for k in d})
     keys = all_keys if metrics is None else \
@@ -150,7 +152,7 @@ def table(columns: "dict[str, dict]", metrics: "list[str] | None" = None, title:
             return _html.escape(str(v))
         return f"{v:.4g}"
 
-    head = "<tr><th>metric</th>" + "".join(f"<th>{_html.escape(str(c))}</th>" for c in flat) + "</tr>"
+    head = f"<tr><th>{_html.escape(corner)}</th>" + "".join(f"<th>{_html.escape(str(c))}</th>" for c in flat) + "</tr>"
     trs = "".join(
         f"<tr><td>{_html.escape(k)}</td>"
         + "".join(f"<td>{fmt(d[k]) if k in d else '–'}</td>" for d in flat.values())
