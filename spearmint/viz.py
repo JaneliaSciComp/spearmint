@@ -60,12 +60,14 @@ def lines(
     dash: "dict[str, str] | None" = None,
     logy: bool = False,
     title: str = "",
+    height: "int | None" = None,
 ) -> str:
     """Multi-trace Plotly line chart -> HTML fragment. ``series``: {label: rows} (or one bare
     rows list), each row a dict. One trace per (series, y column, color-column value), faceted
     into grid subplots by the facet column. ``y``: column name(s), fnmatch globs over numeric
     columns (default: every numeric column except x). ``dash``: {y-glob: plotly dash style}
-    (e.g. {"val_*": "dash"}). ``x`` None -> row index."""
+    (e.g. {"val_*": "dash"}). ``x`` None -> row index. ``height``: total plot px (None -> 380
+    per facet row); every plot is also drag-resizable by its bottom edge in the browser."""
     if isinstance(series, list):
         series = {"": series}
     y_pats = [y] if isinstance(y, str) else y
@@ -112,7 +114,7 @@ def lines(
         "margin": {"t": 56, "r": 10}, "paper_bgcolor": "#0d1117", "plot_bgcolor": "#161b22",
         "font": {"color": "#c9d1d9"}, "showlegend": True,
         "legend": {"orientation": "h", "x": 0, "xanchor": "left", "y": 1.0, "yanchor": "bottom"},
-        "height": 380 * nrows,
+        "height": height or 380 * nrows,
         # Constant across re-renders, so Plotly.react (page()'s live poller) keeps the USER's
         # zoom/pan/legend state while the data underneath updates.
         "uirevision": "keep",
@@ -194,6 +196,8 @@ _STYLE = """
   h1 { font-size: 17px; } h2 { font-size: 14px; border-bottom: 1px solid #30363d;
        padding-bottom: 3px; margin-top: 1.6rem; }
   .note { color: #8b949e; }
+  /* native drag handle (bottom edge): the runtime's ResizeObserver replots at the new height */
+  div.vizplot { resize: vertical; overflow: hidden; min-height: 120px; }
   table { border-collapse: collapse; } td, th { text-align: left; padding: 4px 12px 4px 0; }
   table.metrics th { color: #8b949e; border-bottom: 1px solid #30363d; }
   table.metrics td { border-bottom: 1px solid #21262d; }
@@ -311,7 +315,18 @@ _RUNTIME_JS = """
       var isl = document.getElementById(div.id + "-data");
       if (!isl) return;
       var d = JSON.parse(isl.textContent);
+      if (div.dataset.userh) d.layout.height = +div.dataset.userh;  // drag-resized: keep it across live re-renders
       Plotly.react(div.id, d.traces, d.layout, CFG);
+      if (!div.dataset.ro) {  // CSS resize drags the div's bottom edge; replot at the new height
+        div.dataset.ro = "1";
+        new ResizeObserver(function(){
+          var h = div.clientHeight, cur = +div.dataset.userh || d.layout.height;
+          if (h > 100 && Math.abs(h - cur) > 4) {
+            div.dataset.userh = h;
+            Plotly.relayout(div.id, {height: h});
+          }
+        }).observe(div);
+      }
     });
   }
   var pristine = {};  // section -> structural html as SERVED (the live DOM mutates once drawn)
