@@ -201,7 +201,9 @@ _STYLE = """
   /* native drag handle (bottom edge): the runtime's ResizeObserver replots at the new height */
   div.vizplot { resize: vertical; overflow: hidden; min-height: 120px; }
   table { border-collapse: collapse; } td, th { text-align: left; padding: 4px 12px 4px 0; }
-  table.metrics th { color: #8b949e; border-bottom: 1px solid #30363d; }
+  table.metrics th { color: #8b949e; border-bottom: 1px solid #30363d;
+                     cursor: pointer; user-select: none; }
+  table.metrics th.asc::after { content: " \\25B4"; } table.metrics th.desc::after { content: " \\25BE"; }
   table.metrics td { border-bottom: 1px solid #21262d; }
   img.zoom { cursor: zoom-in; border: 1px solid #30363d; }
   pre { background: #161b22; border: 1px solid #30363d; padding: 10px; overflow-x: auto;
@@ -331,6 +333,37 @@ _RUNTIME_JS = """
       }
     });
   }
+  // Click-to-sort on every metrics table: numeric-aware, toggling desc/asc. State lives here
+  // (keyed by table order) rather than in the DOM, so live section swaps keep the user's sort.
+  var SORT = {};
+  function tables(){ return document.querySelectorAll("table.metrics"); }
+  function applySort(t){
+    var k = Array.prototype.indexOf.call(tables(), t), st = SORT[k];
+    if (!st) return;
+    var rows = Array.prototype.slice.call(t.querySelectorAll("tr"), 1);  // [0] is the header
+    rows.sort(function(a, b){
+      var av = a.cells[st[0]] ? a.cells[st[0]].textContent : "";
+      var bv = b.cells[st[0]] ? b.cells[st[0]].textContent : "";
+      var an = parseFloat(av), bn = parseFloat(bv);
+      var c = (!isNaN(an) && !isNaN(bn)) ? an - bn
+                                         : av.localeCompare(bv, undefined, {numeric: true});
+      return st[1] * c;
+    });
+    if (rows.length) rows.forEach(function(r){ rows[0].parentNode.appendChild(r); });
+    t.querySelectorAll("th").forEach(function(h, i){
+      h.classList.toggle("asc", i === st[0] && st[1] === 1);
+      h.classList.toggle("desc", i === st[0] && st[1] === -1);
+    });
+  }
+  function applySorts(){ tables().forEach(applySort); }
+  document.addEventListener("click", function(ev){
+    var th = ev.target.closest && ev.target.closest("table.metrics th");
+    if (!th) return;
+    var t = th.closest("table.metrics"), k = Array.prototype.indexOf.call(tables(), t);
+    var st = SORT[k];
+    SORT[k] = (st && st[0] === th.cellIndex) ? [th.cellIndex, -st[1]] : [th.cellIndex, -1];
+    applySort(t);
+  });
   var pristine = {};  // section -> structural html as SERVED (the live DOM mutates once drawn)
   document.querySelectorAll("div.sect").forEach(function(s){ pristine[s.id] = strip(s); });
   draw();
@@ -352,6 +385,7 @@ _RUNTIME_JS = """
         }
       });
       draw();
+      applySorts();  // freshly swapped table DOM: re-impose the user's sort
       if (!doc.body.hasAttribute("data-live")) clearInterval(iv);  // final render: stop polling
     }).catch(function(){});  // server briefly gone: keep the page, try again next tick
   }, __INTERVAL__ * 1000);
