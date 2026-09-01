@@ -18,7 +18,8 @@ from pathlib import Path
 
 _PLOT_CDN = '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>'
 # Trace palette (dark-theme friendly), cycled per trace.
-_PALETTE = ["#58a6ff", "#3fb950", "#f85149", "#d29922", "#a371f7", "#ffa657", "#79c0ff", "#7ee787"]
+_PALETTE = ["#58a6ff", "#3fb950", "#f85149", "#d29922", "#a371f7", "#ffa657", "#79c0ff", "#7ee787",
+            "#ff7b72", "#d2a8ff", "#56d364", "#e3b341", "#f778ba", "#76e3ea", "#ffbedd", "#aff5b4"]
 _ids = itertools.count()  # unique plot-div ids across one render
 
 
@@ -70,7 +71,7 @@ def lines(
     y_pats = [y] if isinstance(y, str) else y
     traces: "list[dict]" = []
     facet_vals: "list" = []  # first-seen order, shared across series so facets align
-    for label, rows in series.items():
+    for li, (label, rows) in enumerate(series.items()):
         # Union over all rows, first-seen order: interleaved logs (train rows + sparse val
         # rows) mean rows[0]'s keyset alone misses late-appearing series like val_loss.
         cols = list(dict.fromkeys(c for r in rows for c in r))
@@ -89,12 +90,16 @@ def lines(
                     xs = [r.get(x) for r in grows] if x else list(range(len(grows)))
                     pts = [(xv, yv) for xv, yv in zip(xs, (_num(r.get(yc)) for r in grows))
                            if yv is not None]
+                    # Multi-series overlays (e.g. ablation arms) get ONE color per series
+                    # label -- its train/val traces share it, distinguished by dash. Single-
+                    # series plots keep the old per-trace coloring (one color per y column).
+                    ci = li if len(series) > 1 else len(traces)
                     traces.append({
                         "x": [xv for xv, _ in pts],
                         "y": [yv for _, yv in pts],
                         "name": " · ".join(str(v) for v in (label, yc, gval) if v not in (None, "")),
                         "mode": "lines",
-                        "line": {"dash": d, "color": _PALETTE[len(traces) % len(_PALETTE)]},
+                        "line": {"dash": d, "color": _PALETTE[ci % len(_PALETTE)]},
                         **({"xaxis": f"x{fi + 1}", "yaxis": f"y{fi + 1}"} if fi else {}),
                     })
     n = len(facet_vals) or 1
