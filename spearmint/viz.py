@@ -21,6 +21,9 @@ _PLOT_CDN = '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>'
 _PALETTE = ["#58a6ff", "#3fb950", "#f85149", "#d29922", "#a371f7", "#ffa657", "#79c0ff", "#7ee787",
             "#ff7b72", "#d2a8ff", "#56d364", "#e3b341", "#f778ba", "#76e3ea", "#ffbedd", "#aff5b4"]
 _ids = itertools.count()  # unique plot-div ids across one render
+# Default plot px per facet row -- deliberately SHORT (1/5 the old 380) so a many-panel report
+# scans densely; any plot grows by dragging its bottom edge, or via lines(height=...).
+ROW_HEIGHT = 76
 
 
 def _num(v) -> "float | None":
@@ -66,8 +69,9 @@ def lines(
     rows list), each row a dict. One trace per (series, y column, color-column value), faceted
     into grid subplots by the facet column. ``y``: column name(s), fnmatch globs over numeric
     columns (default: every numeric column except x). ``dash``: {y-glob: plotly dash style}
-    (e.g. {"val_*": "dash"}). ``x`` None -> row index. ``height``: total plot px (None -> 380
-    per facet row); every plot is also drag-resizable by its bottom edge in the browser."""
+    (e.g. {"val_*": "dash"}). ``x`` None -> row index. ``height``: total plot px (None ->
+    ROW_HEIGHT per facet row -- deliberately short); every plot is also drag-resizable by its
+    bottom edge in the browser."""
     if isinstance(series, list):
         series = {"": series}
     y_pats = [y] if isinstance(y, str) else y
@@ -110,20 +114,25 @@ def lines(
     layout: "dict" = {
         # Legend rides ABOVE the plot area (anchored to its own bottom at y=1, growing upward
         # into the top margin) -- Plotly's default bottom placement for horizontal legends
-        # overlaps the x-axis title. Top margin sized for a couple of legend rows.
-        "margin": {"t": 56, "r": 10}, "paper_bgcolor": "#0d1117", "plot_bgcolor": "#161b22",
+        # overlaps the x-axis title. Margins are tight to match the short default height;
+        # the top fits one legend row.
+        "margin": {"t": 24, "b": 34, "l": 56, "r": 10},
+        "paper_bgcolor": "#0d1117", "plot_bgcolor": "#161b22",
         "font": {"color": "#c9d1d9"}, "showlegend": True,
         "legend": {"orientation": "h", "x": 0, "xanchor": "left", "y": 1.0, "yanchor": "bottom"},
-        "height": height or 380 * nrows,
+        "height": height or ROW_HEIGHT * nrows,
         # Constant across re-renders, so Plotly.react (page()'s live poller) keeps the USER's
         # zoom/pan/legend state while the data underneath updates.
         "uirevision": "keep",
     }
     if n > 1:
         layout["grid"] = {"rows": nrows, "columns": ncols, "pattern": "independent"}
+    # y-axis label from the y patterns the caller asked for (a plot with several y columns
+    # names them in the legend; the axis still says what family it shows).
+    ytitle = ", ".join(y_pats) if y_pats else ""
     for i in range(n):
         s = "" if i == 0 else str(i + 1)
-        layout[f"yaxis{s}"] = {"type": "log"} if logy else {}
+        layout[f"yaxis{s}"] = {"title": ytitle, **({"type": "log"} if logy else {})}
         layout[f"xaxis{s}"] = {"title": f"{facet}={facet_vals[i]}" if facet_vals else (x or "index")}
     pid = f"viz{next(_ids)}"
     head = f"<h2>{_html.escape(title)}</h2>" if title else ""
@@ -201,8 +210,9 @@ _STYLE = """
   .logy { float: right; color: #8b949e; font-size: 12px; cursor: pointer; user-select: none; }
   a.home { float: right; color: #8b949e; font-size: 12px; text-decoration: none; }
   a.home:hover { color: #c9d1d9; }
-  /* native drag handle (bottom edge): the runtime's ResizeObserver replots at the new height */
-  div.vizplot { resize: vertical; overflow: hidden; min-height: 120px; }
+  /* native drag handle (bottom edge): the runtime's ResizeObserver replots at the new height.
+     min-height sits under ROW_HEIGHT so the short default isn't padded with dead space. */
+  div.vizplot { resize: vertical; overflow: hidden; min-height: 40px; }
   table { border-collapse: collapse; } td, th { text-align: left; padding: 4px 12px 4px 0; }
   table.metrics th { color: #8b949e; border-bottom: 1px solid #30363d;
                      cursor: pointer; user-select: none; }
@@ -311,7 +321,9 @@ _RUNTIME_JS = """
   // distinguish them from a double-click's isolate gesture). We tried 150ms -- snappier
   // toggles, but the double-click window felt too tight to hit; plotly's 300ms default is
   // the better trade.
-  var CFG = {displayModeBar: true, scrollZoom: true, responsive: true};
+  // No modebar: scroll = zoom, drag = pan-select, double-click = reset axes -- the button
+  // strip added chrome above every plot without adding a gesture that isn't already there.
+  var CFG = {displayModeBar: false, scrollZoom: true, responsive: true};
   function strip(el){  // a section's structural html: islands blanked (data is not structure)
     var c = el.cloneNode(true);
     c.querySelectorAll("script[type='application/json']").forEach(function(n){ n.textContent = ""; });
