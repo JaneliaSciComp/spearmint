@@ -10,6 +10,7 @@ formatters -- dashboard.py builds its status page from the same collect().
 ``dir`` is the ledger/run-output dir; default <git root of cwd>/output_rundb.
 """
 
+import json
 import re
 import sys
 from dataclasses import dataclass
@@ -38,26 +39,53 @@ class JobRow:
     total: timedelta
     avg: timedelta  # total / n_runs -- typical wall clock of ONE attempt
     stale: "list[str] | None"  # None = provenance unknown (run not launched by dagrunner)
+    outdir: str  # ABSOLUTE latest outdir (any status) -- consumers never re-query for it
 
 
 def collect() -> "dict[str, list[JobRow]]":
-    """One ledger scan -> {experiment group: [JobRow, ...]}. Group = first job_key segment
-    (the Experiment prefix). The latest row per job_key wins for status/recency; total sums
-    every attempt's wall clock (a still-wip attempt counts up to now, so totals stay live)."""
+    """ONE ledger scan -> {experiment group: [JobRow, ...]}. Group = first job_key segment
+    (the Experiment prefix). The latest row per job_key wins for status/recency/outdir; total
+    sums every attempt's wall clock (a still-wip attempt counts up to now, so totals stay
+    live). Staleness is computed here from the same scan (rundb.stale_inputs' semantics,
+    batched) rather than per-job_key queries: each rundb call opens a fresh sqlite connection,
+    and over GPFS hundreds of opens per dashboard render cost ~10s."""
     conn = rundb._connect(readonly=True)
     rows = conn.execute(
-        "SELECT job_key, status, lsf_state, started_at, ended_at FROM runs ORDER BY run_id"
+        "SELECT run_id, job_key, status, lsf_state, started_at, ended_at, outdir, inputs "
+        "FROM runs ORDER BY run_id"
     ).fetchall()
     conn.close()
-    latest: "dict[str, tuple[str, str | None, str, str | None]]" = {}
+    latest: "dict[str, tuple[str, str | None, str, str | None, str]]" = {}
     counts: "dict[str, int]" = {}
     totals: "dict[str, timedelta]" = {}
-    for job_key, status, lsf_state, started, ended in rows:
-        latest[job_key] = (status, lsf_state, started, ended)
+    key_of: "dict[int, str]" = {}
+    done_rid: "dict[str, int]" = {}  # job_key -> its latest done run_id
+    done_inputs: "dict[str, str | None]" = {}  # job_key -> that run's recorded inputs (raw)
+    for rid, job_key, status, lsf_state, started, ended, outdir, inputs in rows:
+        key_of[rid] = job_key
+        latest[job_key] = (status, lsf_state, started, ended, outdir)
         counts[job_key] = counts.get(job_key, 0) + 1
         totals[job_key] = totals.get(job_key, timedelta()) + rundb._duration(started, ended)
+        if status == "done":
+            done_rid[job_key] = rid
+            done_inputs[job_key] = inputs
+
+    def stale(job_key: str) -> "list[str] | None":
+        # rundb.stale_inputs, over the in-memory scan: the input run_ids the latest done run
+        # consumed, flagged when their job_key's latest done run is no longer that very run.
+        raw = done_inputs.get(job_key)
+        if raw is None:
+            return None
+        out = []
+        for rid in json.loads(raw):
+            dep = key_of.get(rid)
+            assert dep is not None, f"no run {rid}"
+            if done_rid.get(dep) != rid:
+                out.append(dep)
+        return out
+
     groups: "dict[str, list[JobRow]]" = {}
-    for job_key, (status, lsf_state, started, ended) in latest.items():
+    for job_key, (status, lsf_state, started, ended, outdir) in latest.items():
         row = JobRow(
             job_key=job_key,
             status=status,
@@ -67,7 +95,8 @@ def collect() -> "dict[str, list[JobRow]]":
             ended_at=ended,
             total=totals[job_key],
             avg=totals[job_key] / counts[job_key],
-            stale=rundb.stale_inputs(job_key),
+            stale=stale(job_key),
+            outdir=rundb._abs(outdir),
         )
         groups.setdefault(job_key.split("/")[0], []).append(row)
     return groups

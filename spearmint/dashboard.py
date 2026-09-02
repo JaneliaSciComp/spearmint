@@ -190,21 +190,20 @@ def _page(body: str, live: bool, title: str = "spearmint") -> str:
 _KINDS_CACHE: "dict[str, tuple[float, set[str]]]" = {}
 
 
-def _content_kinds(job_key: str, status: str) -> "set[str]":
-    """The content kinds this stage's /run page would show -- explorer.kinds_in over its latest
-    outdir (cached, see _KINDS_CACHE), plus 'log' for a failed stage whose LSF err log exists."""
+def _content_kinds(r: "report.JobRow") -> "set[str]":
+    """The content kinds this stage's /run page would show -- explorer.kinds_in over the row's
+    outdir (cached, see _KINDS_CACHE), plus 'log' for a failed stage whose LSF err log exists.
+    Takes the JobRow so the outdir comes from collect()'s single scan -- a per-stage
+    latest_outdir() here meant a fresh sqlite connection per stage over GPFS."""
     kinds: "set[str]" = set()
-    if status == "failed" and (Path(rundb.root()) / report.lsf_log_relpath(job_key)).exists():
+    if r.status == "failed" and (Path(rundb.root()) / report.lsf_log_relpath(r.job_key)).exists():
         kinds.add("log")
-    outdir = rundb.latest_outdir(job_key)
-    if outdir:
-        now = time.monotonic()
-        hit = _KINDS_CACHE.get(outdir)
-        if hit is None or hit[0] < now:
-            hit = (now + 60, explorer.kinds_in(outdir))
-            _KINDS_CACHE[outdir] = hit
-        kinds |= hit[1]
-    return kinds
+    now = time.monotonic()
+    hit = _KINDS_CACHE.get(r.outdir)
+    if hit is None or hit[0] < now:
+        hit = (now + 60, explorer.kinds_in(r.outdir))
+        _KINDS_CACHE[r.outdir] = hit
+    return kinds | hit[1]
 
 
 def _reports() -> "set[str]":
@@ -240,7 +239,7 @@ def _report_title(prefix: str) -> str:
 
 def _table() -> str:
     groups = report.collect()
-    kinds = {r.job_key: _content_kinds(r.job_key, r.status) for rows in groups.values() for r in rows}
+    kinds = {r.job_key: _content_kinds(r) for rows in groups.values() for r in rows}
     kinds = {k: v for k, v in kinds.items() if v}  # only stages that actually have something
     reports = _reports()
     titles = {prefix: _report_title(prefix) for prefix in reports}
