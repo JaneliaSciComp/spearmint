@@ -135,6 +135,21 @@ _SORT_JS = """
     });
   }
   window.spSel = select;
+
+  // Arrow keys walk the selection through the experiments table in its CURRENT (sorted)
+  // row order; edges clamp rather than wrap.
+  document.addEventListener("keydown", function(e){
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    var exps = document.getElementById("exps");
+    if (!exps) return;
+    var rows = Array.prototype.slice.call(exps.querySelectorAll("tr.exp"));
+    if (!rows.length) return;
+    e.preventDefault();  // the page must not scroll under the moving selection
+    var i = rows.findIndex(function(r){ return r.dataset.grp === sel; });
+    var j = i < 0 ? 0 : Math.min(rows.length - 1, Math.max(0, i + (e.key === "ArrowDown" ? 1 : -1)));
+    sel = rows[j].dataset.grp;
+    select();
+  });
   applyAll();
   select();
 })();

@@ -161,11 +161,11 @@ def _exp_row_html(group: str, rs: "list[JobRow]", title: str, rep_html: str, opn
     totals = sorted(r.total for r in rs)
     n_stale = sum(1 for r in rs if r.stale)
     stale = "n/a" if all(r.stale is None for r in rs) else (f"{n_stale} stale" if n_stale else "no")
-    short, rest = _exp_names(group)
+    short, _ = _exp_names(group)
     return (
         f'<tr class="exp" data-grp="{html.escape(group, quote=True)}"{opn}>'
-        f'<td class="short">{html.escape(short)}</td>'
-        f'<td class="full">{html.escape(rest)}</td>'
+        # Full group name rides the tooltip -- the column shows just the short handle.
+        f'<td class="short" title="{html.escape(group, quote=True)}">{html.escape(short)}</td>'
         f'<td class="full">{html.escape(title)}</td>'
         f'<td class="rep">{rep_html}</td>'
         f"<td>{len(rs)}</td>"
@@ -262,7 +262,7 @@ def render_html(
                 "</tr>"
             )
     exp_header = (
-        "<tr><th>exp</th><th>name</th><th>title</th><th>reports</th><th>stages</th>"
+        "<tr><th>exp</th><th>title</th><th>reports</th><th>stages</th>"
         "<th>status</th><th>runs</th><th>total</th><th>avg</th><th>last</th><th>stale</th></tr>"
     )
     header = (
