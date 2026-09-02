@@ -10,6 +10,7 @@ formatters -- dashboard.py builds its status page from the same collect().
 ``dir`` is the ledger/run-output dir; default <git root of cwd>/output_rundb.
 """
 
+import re
 import sys
 from dataclasses import dataclass
 from datetime import timedelta
@@ -134,10 +135,17 @@ def _fmt_td(td: timedelta) -> str:
     return str(td).split(".")[0]  # live (wip) durations carry microseconds; drop them
 
 
-def _agg_row_html(group: str, rs: "list[JobRow]") -> str:
-    """One collapsed-view row aggregating a group's stages, cells aligned with the detail
-    columns: stage count, status-count badges, summed runs/total, mean attempt duration with
-    a per-stage-avg histogram (min/max ride the tooltips), newest activity, stale count."""
+def _exp_names(group: str) -> "tuple[str, str]":
+    """'e00_flyem_mae_vs_lejepa' -> ('e00', 'flyem_mae_vs_lejepa'); a group without the eNN
+    prefix keeps its whole name as the short name (empty long half)."""
+    m = re.match(r"(e\d+)[_-](.+)", group)
+    return (m.group(1), m.group(2)) if m else (group, "")
+
+
+def _exp_row_html(group: str, rs: "list[JobRow]", title: str, rep_html: str, opn: str) -> str:
+    """One experiments-table row: shortname | name | report title | report links | the
+    aggregates over the group's stages (stage count, status-count badges, summed runs/total,
+    mean attempt duration with a per-stage-avg histogram; min/max ride the tooltips)."""
     import html
     from collections import Counter
 
@@ -153,9 +161,14 @@ def _agg_row_html(group: str, rs: "list[JobRow]") -> str:
     totals = sorted(r.total for r in rs)
     n_stale = sum(1 for r in rs if r.stale)
     stale = "n/a" if all(r.stale is None for r in rs) else (f"{n_stale} stale" if n_stale else "no")
+    short, rest = _exp_names(group)
     return (
-        f'<tr class="agg" data-grp="{html.escape(group, quote=True)}">'
-        f'<td class="key">{len(rs)} stages</td>'
+        f'<tr class="exp" data-grp="{html.escape(group, quote=True)}"{opn}>'
+        f'<td class="short">{html.escape(short)}</td>'
+        f'<td class="full">{html.escape(rest)}</td>'
+        f'<td class="full">{html.escape(title)}</td>'
+        f'<td class="rep">{rep_html}</td>'
+        f"<td>{len(rs)}</td>"
         f"<td>{badges}</td>"
         f"<td>{sum(r.n_runs for r in rs)}</td>"
         f'<td title="per stage: min {_fmt_td(totals[0])} · max {_fmt_td(totals[-1])}">{_fmt_td(total)}</td>'
@@ -180,16 +193,18 @@ def render_html(
     reports: "set[str] | None" = None,
     report_titles: "dict[str, str] | None" = None,
 ) -> str:
-    """The status table as an HTML fragment (no <html>/<head> shell -- dashboard.py wraps it,
-    and swaps just this fragment in on each refresh). Pure formatter over collect()'s data, the
-    HTML sibling of render(). Each stage links to its run page (/run/<job_key>); a failed
-    stage's badge links to its err log (/file/<lsf log>) -- both dashboard.py routes. ``kinds``
-    maps job_key -> the set of content kinds its run page holds (png/table/json/log, resolved
-    by dashboard._content_kinds); each gets a trailing glyph (explorer.CONTENT_SYMBOLS).
+    """The status view as an HTML fragment (no <html>/<head> shell -- dashboard.py wraps it,
+    and swaps just this fragment in on each refresh): TWO tables. #exps has one row per
+    experiment group -- shortname | name | report title | report links | aggregates -- and
+    #stages holds every group's stage rows; the dashboard's select script shows only the
+    clicked experiment's stages (most recently active one on first paint, via ``data-open``).
+    Each stage links to its run page (/run/<job_key>); a failed stage's badge links to its err
+    log (/file/<lsf log>) -- both dashboard.py routes. ``kinds`` maps job_key -> the set of
+    content kinds its run page holds (png/table/json/log, resolved by
+    dashboard._content_kinds); each gets a trailing glyph (explorer.CONTENT_SYMBOLS).
     ``reports`` holds experiment prefixes with a driver-rendered report.html under
-    ROOT/_reports (may be multi-segment, e.g. "e00/smoke"): a group row shows its own report
-    (if any) and any nested under it as three independently-aligned columns -- name | title |
-    report links. ``report_titles`` maps those same prefixes -> the short label scraped off
+    ROOT/_reports (may be multi-segment, e.g. "e00/smoke"): own + nested links land in the
+    reports column. ``report_titles`` maps those same prefixes -> the short label scraped off
     report.html (viz.page's ``short_title``, see dashboard._report_title); the title column
     prefers the group's own title, else the first nested one that has one."""
     import html
@@ -200,32 +215,23 @@ def render_html(
     kinds = kinds or {}
     reports = reports or set()
     report_titles = report_titles or {}
+    exp_rows = []
     rows = []
 
     def report_link(prefix: str, text: str) -> str:
         return f'<a href="/file/{quote(f"_reports/{prefix}/report.html")}">{html.escape(text)}</a>'
 
-    # One group unfolds at a time in the dashboard (see its fold script); the rest collapse
-    # to their agg row. The most recently active group is marked as the default-open one.
     newest = max(groups, key=lambda g: max(r.started_at for r in groups[g]), default=None)
     for group in sorted(groups):
         own_report = group in reports
         nested = sorted(r for r in reports if r.startswith(f"{group}/"))
-        name_html = report_link(group, group) if own_report else html.escape(group)
         title = report_titles.get(group) if own_report else None
         if not title:
             title = next((report_titles[r] for r in nested if report_titles.get(r)), None)
-        links_html = " ".join(report_link(r, r.split("/", 1)[1]) for r in nested)
-        head = (
-            f'<span class="grp-name">{name_html}</span>'
-            f'<span class="grp-title">{html.escape(title) if title else ""}</span>'
-            f'<span class="grp-links">{links_html}</span>'
-        )
-        grp = html.escape(group, quote=True)
+        links = ([report_link(group, "📈")] if own_report else []) + \
+            [report_link(r, "📈" + r.split("/", 1)[1]) for r in nested]
         opn = " data-open" if group == newest else ""
-        rows.append(f'<tr class="group" data-grp="{grp}"{opn}>'
-                    f'<td colspan="7"><span class="tri">▸</span>{head}</td></tr>')
-        rows.append(_agg_row_html(group, groups[group]))
+        exp_rows.append(_exp_row_html(group, groups[group], title or "", " ".join(links), opn))
         prev_sub = None
         for r in sorted(groups[group], key=lambda r: r.job_key):
             # A vertical break where the SUB-experiment prefix changes (e00/short -> e00/smoke)
@@ -255,11 +261,16 @@ def render_html(
                 f'<td class="stale">{html.escape(stale)}</td>'
                 "</tr>"
             )
+    exp_header = (
+        "<tr><th>exp</th><th>name</th><th>title</th><th>reports</th><th>stages</th>"
+        "<th>status</th><th>runs</th><th>total</th><th>avg</th><th>last</th><th>stale</th></tr>"
+    )
     header = (
         "<tr><th>stage</th><th>status</th><th>runs</th><th>total</th><th>avg</th>"
         "<th>last</th><th>stale</th></tr>"
     )
-    return f"<table>{header}{''.join(rows)}</table>"
+    return (f'<table id="exps">{exp_header}{"".join(exp_rows)}</table>'
+            f'<table id="stages">{header}{"".join(rows)}</table>')
 
 
 if __name__ == "__main__":

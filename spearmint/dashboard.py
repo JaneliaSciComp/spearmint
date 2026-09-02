@@ -34,13 +34,14 @@ REFRESH_SECONDS = 10  # status-table auto-refresh (ledger mode's home page only)
 # Status-table styling on top of explorer.STYLE (which carries the theme + artifact panels).
 _STYLE = """
   #meta { color: #8b949e; margin-bottom: 12px; }
-  /* group row: name | title | report links, independently aligned columns */
-  tr.group td { padding-top: 16px; display: flex; align-items: baseline; gap: 14px; }
-  .grp-name { color: #58a6ff; font-weight: 600; flex: 0 0 auto; min-width: 70px; }
-  .grp-title { color: #58a6ff; font-weight: 400; flex: 0 0 auto; min-width: 300px; }
-  .grp-links { color: #8b949e; display: flex; gap: 10px; flex-wrap: wrap; }
-  .grp-name a, .grp-title a, .grp-links a { color: inherit; }
-  /* stage links muted -- the blue bold group rows carry the visual structure */
+  /* experiments table: blue shortname/name/title carry the structure; row click selects */
+  td.short { color: #58a6ff; font-weight: 600; }
+  td.full { color: #58a6ff; }
+  td.rep { color: #8b949e; } td.rep a { color: inherit; }
+  tr.exp { cursor: pointer; }
+  tr.exp.sel td { background: #161b22; }
+  #stages { margin-top: 22px; }
+  /* stage links muted -- the blue experiment rows carry the visual structure */
   td.key a { color: #8b949e; } td.key a:hover { color: #c9d1d9; }
   td.key { color: #8b949e; } td.stale { color: #8b949e; }
   .mark { color: #8b949e; }  /* trailing content-kind glyphs (explorer.CONTENT_SYMBOLS) */
@@ -52,19 +53,17 @@ _STYLE = """
   pre.err { color: #ffa198; }
   tr.subbreak td { padding-top: 18px; }  /* vertical break between sub-experiments (e00/short | e00/smoke) */
   th { cursor: pointer; user-select: none; }
-  tr.group { cursor: pointer; }
-  .tri { color: #8b949e; font-weight: 400; }
-  tr.agg td { color: #8b949e; }  /* the collapsed-group aggregate row */
 """
 
-# Click a column header -> sort by it (toggle direction, ▲/▼ sigil on the active header).
-# Rows sort WITHIN their blocks -- group rows and subbreak rows delimit segments, so
-# experiments and sub-experiment tiers never intermix; the subbreak spacing is re-pinned to
-# each block's new first row. State lives in JS globals and re-applies after every /table
-# swap (pull() calls spSort). Built as a plain string (no f-string brace doubling).
+# Click a column header -> sort that table by it (toggle direction, ▲/▼ sigil). The
+# experiments table sorts as one flat block; the stages table sorts WITHIN blocks delimited
+# by experiment (data-grp change) and sub-experiment tier (subbreak), so tiers never
+# intermix and the subbreak spacing re-pins to each block's new first row. Sort state and
+# the selected experiment live in JS globals and re-apply after every /table swap (pull()
+# calls spSort + spSel). Built as a plain string (no f-string brace doubling).
 _SORT_JS = """
 (function(){
-  var sortCol = null, sortDir = 1;
+  var SORT = {};  // table id -> [col, dir]
   function key(td){
     var t = td.textContent.trim();
     var m = t.match(/^(?:(\\d+) days?, )?(\\d+):(\\d\\d):(\\d\\d)$/);  // timedelta strings
@@ -72,81 +71,72 @@ _SORT_JS = """
     if (t !== "" && !isNaN(+t)) return +t;
     return t.toLowerCase();
   }
-  function apply(){
-    var table = document.querySelector("#table table");
-    if (!table) return;
+  function apply(table){
+    var st = SORT[table.id];
     table.querySelectorAll("th").forEach(function(th, i){
       th.textContent = th.textContent.replace(/ [▲▼]$/, "");
-      if (i === sortCol) th.textContent += sortDir > 0 ? " ▲" : " ▼";
+      if (st && i === st[0]) th.textContent += st[1] > 0 ? " ▲" : " ▼";
       th.onclick = function(){
-        sortDir = (sortCol === i) ? -sortDir : 1;
-        sortCol = i;
-        apply();
+        SORT[table.id] = (st && st[0] === i) ? [i, -st[1]] : [i, 1];
+        apply(table);
       };
     });
-    if (sortCol === null) return;
+    if (!st) return;
     var rows = Array.prototype.filter.call(table.querySelectorAll("tr"),
                                            function(r){ return !r.querySelector("th"); });
-    var groups = [];
+    var blocks = [], prev = null;
     rows.forEach(function(r){
-      if (r.classList.contains("group")) { groups.push({header: r, agg: null, blocks: [[]]}); return; }
-      if (!groups.length) groups.push({header: null, agg: null, blocks: [[]]});
-      var g = groups[groups.length - 1];
-      if (r.classList.contains("agg")) { g.agg = r; return; }  // rides with its header, never sorts
-      if (r.classList.contains("subbreak") && g.blocks[g.blocks.length - 1].length) g.blocks.push([]);
-      g.blocks[g.blocks.length - 1].push(r);
+      var brk = table.id !== "exps" &&
+                (r.dataset.grp !== prev || r.classList.contains("subbreak"));
+      if (!blocks.length || brk) blocks.push([]);
+      blocks[blocks.length - 1].push(r);
+      prev = r.dataset.grp;
     });
-    var body = table.tBodies[0] || table;
-    groups.forEach(function(g){
-      if (g.header) body.appendChild(g.header);
-      if (g.agg) body.appendChild(g.agg);
-      g.blocks.forEach(function(block, bi){
-        block.sort(function(a, b){
-          var ka = key(a.cells[sortCol]), kb = key(b.cells[sortCol]);
-          return (ka < kb ? -1 : ka > kb ? 1 : 0) * sortDir;
-        });
-        block.forEach(function(r, ri){
-          r.classList.toggle("subbreak", bi > 0 && ri === 0);
-          body.appendChild(r);
-        });
+    var body = table.tBodies[0] || table, prevGrp = null;
+    blocks.forEach(function(block){
+      block.sort(function(a, b){
+        var ka = key(a.cells[st[0]]), kb = key(b.cells[st[0]]);
+        return (ka < kb ? -1 : ka > kb ? 1 : 0) * st[1];
       });
+      block.forEach(function(r, ri){
+        // subbreak = later tier of the SAME experiment; a new experiment's first block isn't one
+        if (table.id !== "exps") r.classList.toggle("subbreak", ri === 0 && r.dataset.grp === prevGrp);
+        body.appendChild(r);
+      });
+      prevGrp = block[block.length - 1].dataset.grp;
     });
   }
-  window.spSort = apply;
+  function applyAll(){ document.querySelectorAll("#table table").forEach(apply); }
+  window.spSort = applyAll;
 
-  // One experiment unfolds at a time: stage rows show only for the open group; every other
-  // group shows just its aggregate row. First paint opens the server-suggested group
-  // (data-open = most recent activity); after that the user's choice is sticky across
-  // /table swaps. Clicking the open group's header folds everything.
-  var openGrp = null, openInit = false;
-  function fold(){
-    var table = document.querySelector("#table table");
-    if (!table) return;
-    if (!openInit) {
-      var d = table.querySelector("tr.group[data-open]");
-      openGrp = d ? d.dataset.grp : null;
-      openInit = true;
+  // Selecting a row in the experiments table shows that experiment's stages in the stages
+  // table. First paint selects the server-suggested row (data-open = most recent activity);
+  // after that the user's choice is sticky across /table swaps.
+  var sel = null, selInit = false;
+  function select(){
+    var exps = document.getElementById("exps"), stages = document.getElementById("stages");
+    if (!exps || !stages) return;
+    if (!selInit) {
+      var d = exps.querySelector("tr[data-open]");
+      sel = d ? d.dataset.grp : null;
+      selInit = true;
     }
-    table.querySelectorAll("tr").forEach(function(r){
-      if (r.classList.contains("group")) {
-        var open = r.dataset.grp === openGrp;
-        var tri = r.querySelector(".tri");
-        if (tri) tri.textContent = open ? "▾" : "▸";
-        r.onclick = function(e){
-          if (e.target.closest("a")) return;  // report links inside the header still navigate
-          openGrp = (openGrp === r.dataset.grp) ? null : r.dataset.grp;
-          fold();
-        };
-        return;
-      }
+    exps.querySelectorAll("tr.exp").forEach(function(r){
+      r.classList.toggle("sel", r.dataset.grp === sel);
+      r.onclick = function(e){
+        if (e.target.closest("a")) return;  // report links still navigate
+        sel = r.dataset.grp;
+        select();
+      };
+    });
+    stages.querySelectorAll("tr").forEach(function(r){
       if (!r.dataset.grp) return;  // the <th> header row
-      var open = r.dataset.grp === openGrp;
-      r.style.display = r.classList.contains("agg") ? (open ? "none" : "") : (open ? "" : "none");
+      r.style.display = r.dataset.grp === sel ? "" : "none";
     });
   }
-  window.spFold = fold;
-  apply();
-  fold();
+  window.spSel = select;
+  applyAll();
+  select();
 })();
 """
 
@@ -156,8 +146,8 @@ async function pull() {{
   document.getElementById('table').innerHTML = await r.text();
   document.getElementById('meta').textContent =
     'updated ' + new Date().toLocaleTimeString() + ' ({REFRESH_SECONDS}s refresh)';
-  window.spSort && window.spSort();  // re-apply the active column sort + sigil after the swap
-  window.spFold && window.spFold();  // re-apply which experiment is unfolded
+  window.spSort && window.spSort();  // re-apply each table's active column sort + sigil
+  window.spSel && window.spSel();    // re-apply which experiment is selected
 }}
 setInterval(pull, {REFRESH_SECONDS} * 1000);
 </script>"""
