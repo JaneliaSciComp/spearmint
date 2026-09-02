@@ -416,12 +416,13 @@ def _run_page(job_key: str) -> str:
     outdir = rundb.latest_outdir(job_key) or ""
     commit = (rundb._latest("commit_id", job_key, None) or "")[:12]
     started = report.fmt_ts(rundb._latest("started_at", job_key, None))
+    # No h2 repeating the job_key -- the page shell's h1 already carries it (title= below);
+    # the badge rides the meta line instead.
     meta = (
         f"<p><a href='/'>&larr; all stages</a></p>"
-        f"<h2>{html.escape(job_key)} "
-        f'<span class="badge {report._status_class_for(status)}">{html.escape(status)}</span></h2>'
-        f"<p class='note'>commit {html.escape(commit)} · started {html.escape(started)} · "
-        f"<code>{html.escape(outdir)}</code></p>"
+        f'<p class="note"><span class="badge {report._status_class_for(status)}">'
+        f"{html.escape(status)}</span> · commit {html.escape(commit)} · "
+        f"started {html.escape(started)} · <code>{html.escape(outdir)}</code></p>"
     )
     rel = str(Path(outdir).resolve().relative_to(Path(rundb.root()).resolve())) if outdir else ""
     prev = _previous_outdir(job_key, rel) if rel else None
