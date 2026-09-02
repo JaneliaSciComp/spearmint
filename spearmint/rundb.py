@@ -346,7 +346,9 @@ def _start(
     assumed dead outright, then ``_assert_not_running(job_key)`` refuses to proceed at all if a
     "wip" row is confirmed genuinely still alive -- "extend"/"replace" reusing/clearing a
     directory a live process is still writing into, or two concurrent attempts racing each
-    other under "new", are both worse than a loud, early failure here.
+    other under "new", are both worse than a loud, early failure here. (A dagrunner/aio driver
+    normally never trips this: it WAITS per stage for another process's live run to close --
+    aio._wait_not_running -- so this assert is its cross-process race backstop.)
 
     Directory naming for a fresh mint: {ROOT}/{job_key}/run{run_id:05d} -- job_key's "/"s
     become real path nesting (experiment prefix -> stage name -> attempt mirrors the model, and

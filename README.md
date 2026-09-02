@@ -112,6 +112,10 @@ touch the db (sqlite over a shared filesystem breaks under multi-node writes). D
 own independently-`bsub`bed jobs in `spearmint.run()` from many nodes at once; go through the
 scheduler, or keep bare runs on a single machine.
 
+A second driver over the same experiment is fine: stages whose job_key is live under the
+first driver just wait (`[wait]` printed) for that run to close, then skip or launch as
+usual — so you can force-rerun a failed stage while a long train keeps running.
+
 ### Experiment reports (Python, live)
 
 A report is a standalone script: `spearmint.load` turns the ledger + run dirs into plain

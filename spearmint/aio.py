@@ -38,6 +38,7 @@ from pathlib import Path
 from . import rundb
 
 STOP_GRACE_SECONDS = 15  # signal -> escalate gap for Job.cancel()
+WAIT_POLL_SECONDS = 5  # ledger re-check cadence while waiting on another process's live run
 
 _JOBID_RE = re.compile(r"Job <(\d+)> is submitted")
 _STARTED_RE = re.compile(r"<<Starting on (\S+?)>>")
@@ -61,6 +62,23 @@ def _signal(proc, jobid: "str | None") -> None:
         subprocess.run(["bkill", jobid], capture_output=True)
     else:
         proc.terminate()
+
+
+async def _wait_not_running(name: str, job_key: str) -> None:
+    """Block this job while ANOTHER process holds a live wip row for job_key -- a second
+    driver waits for the first, per stage, instead of dying on rundb's guard. Each lap
+    reconciles first, so a crash-killed holder (SIGKILL, node death) flips to failed and
+    frees us within one poll; the guard in rundb._start stays as the TOCTOU backstop."""
+    waited = False
+    while True:
+        rundb.reconcile_wip(job_key)
+        live = rundb.latest_outdir(job_key, status="wip")
+        if live is None:
+            return
+        if not waited:
+            print(f"[wait] {name}: {job_key} live in another process ({live}) -- waiting", flush=True)
+            waited = True
+        await asyncio.sleep(WAIT_POLL_SECONDS)
 
 
 class Job:
@@ -165,9 +183,11 @@ class Job:
     async def _run(self, deps: "tuple[Job, ...]", forced: "str | None") -> str:
         if deps:
             await asyncio.gather(*deps)  # a failed dep raises JobFailed here -> we cascade
-            # The skip/mode decision for dep-carrying jobs happens HERE, not at submit --
-            # whether a dep actually re-ran (.ran) is only knowable once the deps resolved
-            # (create_task hasn't executed anything at submit time).
+        if self._row is None:  # not minted in submit(): dep-carrying, or dep-free deferred
+            # behind another process's live run. The skip/mode decision happens HERE, not at
+            # submit -- whether a dep actually re-ran (.ran) is only knowable once the deps
+            # resolved, and a live job_key must close before its ledger state means anything.
+            await _wait_not_running(self.name, self.job_key)
             dep_ran = any(d.ran for d in deps)
             if forced is None and not dep_ran and rundb.is_done(self.job_key):
                 self._row = _done_row(self.job_key)
@@ -175,11 +195,13 @@ class Job:
                 _skip_print(self.name, self.job_key)
                 return self._row.outdir
             self._mode = forced or ("new" if dep_ran else "replace")
-        if self._stopping and self._row is None:
-            raise JobFailed(self.job_key, "cancelled before start")
-        if self._row is None:  # dep-free submits inserted their row synchronously in submit()
+            if self._stopping:
+                raise JobFailed(self.job_key, "cancelled before start")
             self._resolve_spec()
-            self._ctx._insert_row(self, deps)
+            try:
+                self._ctx._insert_row(self, deps)
+            except AssertionError as e:  # lost the cross-process TOCTOU race: fail THIS stage
+                raise JobFailed(self.job_key, f"launch refused: {e}")
         cmd = self._final_cmd(deps)
         async with self._ctx._sem:  # cap concurrent child processes (Ctx max_parallel)
             print(f"[run] {self.name}: {' '.join(cmd)}", flush=True)
@@ -272,17 +294,24 @@ class Ctx:
         job._cmd = cmd
         job._outdir_args = outdir_args
         if not deps:
-            # Dep-free jobs decide NOW: skip needs no waiting, and a launching job's row is
-            # minted synchronously so job.outdir is immediately usable (validators).
+            # Dep-free jobs decide NOW when they can: a done row skips immediately (even if a
+            # NEWER attempt is live under another driver -- a completed result exists), and a
+            # launching job with no wip row is minted synchronously so job.outdir is
+            # immediately usable (validators). Only a would-launch job behind a visible wip
+            # row -- live under another driver, or stale from a crash -- defers into the task
+            # (Job._run), which waits for the row to close (reconciling each lap, so a stale
+            # one frees up in one lap) and then re-decides; such a job's .outdir is not
+            # available at submit time.
             if forced is None and rundb.is_done(job_key):
                 job._row = _done_row(job_key)
                 job.skipped = True
                 _skip_print(name, job_key)
                 job._task = asyncio.get_running_loop().create_task(_done(job._row.outdir))
                 return job
-            job._mode = forced or "replace"
-            job._resolve_spec()
-            self._insert_row(job, deps)
+            if rundb.latest_outdir(job_key, status="wip") is None:
+                job._mode = forced or "replace"
+                job._resolve_spec()
+                self._insert_row(job, deps)
         job._task = asyncio.get_running_loop().create_task(job._run(deps, forced))
         return job
 
