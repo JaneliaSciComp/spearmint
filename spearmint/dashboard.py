@@ -16,6 +16,7 @@ ledger) and connect through the ssh tunnel command printed at startup.
 
 import html
 import json
+import re
 import subprocess
 import sys
 import time
@@ -205,11 +206,35 @@ def _reports() -> "set[str]":
     return {str(p.parent.relative_to(rdir)) for p in rdir.rglob("report.html")}
 
 
+# Dashboard-sized label per report prefix, scraped from its own report.html (viz.page's
+# ``data-short-title`` body attribute) rather than duplicated state -- cached like
+# _KINDS_CACHE, same GPFS-cost rationale (every home load / refresh tick would otherwise
+# reread every report.html).
+_TITLE_CACHE: "dict[str, tuple[float, str]]" = {}
+
+
+def _report_title(prefix: str) -> str:
+    now = time.monotonic()
+    hit = _TITLE_CACHE.get(prefix)
+    if hit is not None and hit[0] > now:
+        return hit[1]
+    path = Path(rundb.root()) / rundb.REPORTS_DIR / prefix / "report.html"
+    title = ""
+    if path.exists():
+        m = re.search(r'data-short-title="([^"]*)"', path.read_text(errors="replace"))
+        if m:
+            title = html.unescape(m.group(1))
+    _TITLE_CACHE[prefix] = (now + 60, title)
+    return title
+
+
 def _table() -> str:
     groups = report.collect()
     kinds = {r.job_key: _content_kinds(r.job_key, r.status) for rows in groups.values() for r in rows}
     kinds = {k: v for k, v in kinds.items() if v}  # only stages that actually have something
-    return report.render_html(groups, kinds=kinds, reports=_reports())
+    reports = _reports()
+    titles = {prefix: _report_title(prefix) for prefix in reports}
+    return report.render_html(groups, kinds=kinds, reports=reports, report_titles=titles)
 
 
 # --- run diff ------------------------------------------------------------------------------

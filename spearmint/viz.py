@@ -414,7 +414,8 @@ _RUNTIME_JS = """
 """
 
 
-def page(*sections: str, title: str = "report", refresh: "int | None" = None) -> str:
+def page(*sections: str, title: str = "report", short_title: "str | None" = None,
+         description: str = "", refresh: "int | None" = None) -> str:
     """A self-contained HTML document wrapping ``sections`` (fragments from lines/table/images
     or any HTML string of your own): dark shell, Plotly CDN, the image lightbox, and the plot
     runtime (zoom/pan toolbar + scroll-zoom on every chart). ``refresh`` (seconds) makes an
@@ -422,19 +423,26 @@ def page(*sections: str, title: str = "report", refresh: "int | None" = None) ->
     existing plots, so your zoom/pan survives updates (see _RUNTIME_JS). Pass it CONDITIONALLY
     (``refresh=5 if missing else None``): the run's final render omits the live marker and the
     tab stops polling, zoom intact. Keep a live report's section count/order stable across
-    renders ("" placeholders are fine) -- sections are matched by position."""
+    renders ("" placeholders are fine) -- sections are matched by position.
+
+    ``description`` (a sentence or two on what the report shows/tests) renders as a muted line
+    under the heading. ``short_title`` (a few words, e.g. "token dropout") is a dashboard-sized
+    label for this experiment -- dashboard.py scrapes it off the saved report.html (see the
+    ``data-short-title`` body attribute below) to label the group row; defaults to ``title``."""
     global _ids
     body = "".join(f'<div class="sect" id="sect{i}">{s}</div>' for i, s in enumerate(sections))
     runtime = _RUNTIME_JS.replace("__INTERVAL__", str(refresh or 0))
     _ids = itertools.count()  # plot ids restart per page, so re-renders line up island-for-island
     live = ' data-live="1"' if refresh else ""  # backslash-free: 3.11 f-strings reject \ in expressions
+    short = _html.escape(short_title or title, quote=True)
+    desc = note(description) if description else ""
     # "⌂ dashboard" -> the browse server's home when served through it (the normal path);
     # a report opened straight off disk just has a dead muted link. Beats browser-back, which
     # re-fetches the whole home page (this page's timers keep it out of bfcache).
     home = '<a class="home" href="/">&#8962; dashboard</a>'
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f"<title>{_html.escape(title)}</title>{_PLOT_CDN}<style>{_STYLE}</style></head>"
-            f"<body{live}>{home}<h1>{_html.escape(title)}</h1>{body}"
+            f'<body{live} data-short-title="{short}">{home}<h1>{_html.escape(title)}</h1>{desc}{body}'
             f'<div id="viewer"><div class="hint">scroll = zoom · drag = pan · arrows = walk the '
             f'grid · Esc / click background = close</div><img id="viewer_img"/></div>'
             f"<script>{_LIGHTBOX_JS}</script><script>{runtime}</script></body></html>")

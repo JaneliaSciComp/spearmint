@@ -178,6 +178,7 @@ def render_html(
     groups: "dict[str, list[JobRow]]",
     kinds: "dict[str, set[str]] | None" = None,
     reports: "set[str] | None" = None,
+    report_titles: "dict[str, str] | None" = None,
 ) -> str:
     """The status table as an HTML fragment (no <html>/<head> shell -- dashboard.py wraps it,
     and swaps just this fragment in on each refresh). Pure formatter over collect()'s data, the
@@ -187,7 +188,9 @@ def render_html(
     by dashboard._content_kinds); each gets a trailing glyph (explorer.CONTENT_SYMBOLS).
     ``reports`` holds experiment prefixes with a driver-rendered report.html under
     ROOT/_reports (may be multi-segment, e.g. "e00/smoke"): a group row links its own report
-    and any nested under it."""
+    and any nested under it. ``report_titles`` maps those same prefixes -> the short label
+    scraped off report.html (viz.page's ``short_title``, see dashboard._report_title); a
+    prefix without one falls back to its bare tier name, same as before this existed."""
     import html
     from urllib.parse import quote
 
@@ -195,6 +198,7 @@ def render_html(
 
     kinds = kinds or {}
     reports = reports or set()
+    report_titles = report_titles or {}
     rows = []
 
     def report_link(prefix: str, text: str) -> str:
@@ -206,9 +210,10 @@ def render_html(
     for group in sorted(groups):
         head = html.escape(group)
         if group in reports:
-            head = report_link(group, f"{group} 📈")
+            label = report_titles.get(group)
+            head = report_link(group, f"{group} 📈 {label}" if label else f"{group} 📈")
         head += "".join(
-            f' <span class="mark">{report_link(r, "📈" + r.split("/", 1)[1])}</span>'
+            f' <span class="mark">{report_link(r, "📈" + (report_titles.get(r) or r.split("/", 1)[1]))}</span>'
             for r in sorted(reports) if r.startswith(f"{group}/")
         )
         grp = html.escape(group, quote=True)
