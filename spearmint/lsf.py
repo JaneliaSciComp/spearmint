@@ -55,8 +55,10 @@ def _prefix(job_key: str, queue: str, walltime: str, slots: int, gpus: int,
     log_dir = _log_dir()
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     name = job_key.replace("/", "_")
+    # LSF -R sections (select[]/span[]/...) join with a space, not &&: && only combines
+    # conditions WITHIN one section (e.g. select[mem>1000 && swp>1000]).
     select = " && ".join(f"hname!='{h}'" for h in (exclude_hosts or []))
-    resource_req = f"select[{select}] && span[hosts=1]" if select else "span[hosts=1]"
+    resource_req = f"select[{select}] span[hosts=1]" if select else "span[hosts=1]"
     return [
         "bsub", "-K",
         "-J", name,
