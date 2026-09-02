@@ -41,6 +41,12 @@ LSF_PROJECT = "miaai"
 GPU_QUEUE = "gpu_b300"  # Janelia GPU queue preference: b300 > h200 > h100 > a100 > l4
 GPU_SLOTS = 12
 CPU_QUEUE = "local"
+# Nodes with a confirmed-recurring GPU health problem (cudaErrorDevicesUnavailable across
+# multiple unrelated jobs/experiments, not a one-off) -- LSF itself doesn't know a node is
+# unhealthy, so blind retries keep landing there without this. gpu()'s own exclude_hosts=
+# merges with this list, never replaces it. Clear an entry once the node is confirmed fixed.
+KNOWN_BAD_HOSTS: "list[str]" = ["i03u22"]  # 2026-09-02: 7 cudaErrorDevicesUnavailable failures
+                                            # across e02/e05/e07, unrelated jobs, same day
 
 
 def _log_dir() -> str:
@@ -78,12 +84,12 @@ def gpu(queue: "str | None" = None, walltime: str = "4:00", slots: "int | None" 
     """Stage cmd_prefix for a GPU LSF job (queue defaults to GPU_QUEUE, slots to GPU_SLOTS per
     GPU). ``gpus>1`` puts them all on one host (span[hosts=1]) -- single-node DDP territory;
     the worker still has to opt into using them (e.g. Lightning strategy=ddp). ``exclude_hosts``:
-    hostnames to steer LSF away from (e.g. a node whose GPUs keep throwing
-    cudaErrorDevicesUnavailable across unrelated jobs -- LSF itself doesn't know it's
-    unhealthy, so it keeps getting scheduled there on retry without this)."""
+    hostnames to steer LSF away from, ON TOP OF KNOWN_BAD_HOSTS (always applied -- a caller
+    can add more, never fewer)."""
     queue = queue or GPU_QUEUE
     slots = GPU_SLOTS * gpus if slots is None else slots
-    return lambda job_key: _prefix(job_key, queue, walltime, slots, gpus=gpus, exclude_hosts=exclude_hosts)
+    hosts = list(KNOWN_BAD_HOSTS) + list(exclude_hosts or [])
+    return lambda job_key: _prefix(job_key, queue, walltime, slots, gpus=gpus, exclude_hosts=hosts)
 
 
 def cpu(queue: "str | None" = None, walltime: str = "1:00", slots: int = 1) -> "Callable[[str], list[str]]":
