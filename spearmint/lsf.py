@@ -50,10 +50,13 @@ def _log_dir() -> str:
     return f"{rundb.root()}/_lsf_logs"
 
 
-def _prefix(job_key: str, queue: str, walltime: str, slots: int, gpus: int) -> "list[str]":
+def _prefix(job_key: str, queue: str, walltime: str, slots: int, gpus: int,
+           exclude_hosts: "list[str] | None" = None) -> "list[str]":
     log_dir = _log_dir()
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     name = job_key.replace("/", "_")
+    select = " && ".join(f"hname!='{h}'" for h in (exclude_hosts or []))
+    resource_req = f"select[{select}] && span[hosts=1]" if select else "span[hosts=1]"
     return [
         "bsub", "-K",
         "-J", name,
@@ -61,20 +64,24 @@ def _prefix(job_key: str, queue: str, walltime: str, slots: int, gpus: int) -> "
         "-q", queue,
         "-W", walltime,
         "-n", str(slots),
-        "-R", "span[hosts=1]",
+        "-R", resource_req,
         *(["-gpu", f"num={gpus}:mode=exclusive_process"] if gpus else []),
         "-oo", f"{log_dir}/{name}.log",
         "uv", "run", "python",
     ]
 
 
-def gpu(queue: "str | None" = None, walltime: str = "4:00", slots: "int | None" = None, gpus: int = 1) -> "Callable[[str], list[str]]":
+def gpu(queue: "str | None" = None, walltime: str = "4:00", slots: "int | None" = None, gpus: int = 1,
+       exclude_hosts: "list[str] | None" = None) -> "Callable[[str], list[str]]":
     """Stage cmd_prefix for a GPU LSF job (queue defaults to GPU_QUEUE, slots to GPU_SLOTS per
     GPU). ``gpus>1`` puts them all on one host (span[hosts=1]) -- single-node DDP territory;
-    the worker still has to opt into using them (e.g. Lightning strategy=ddp)."""
+    the worker still has to opt into using them (e.g. Lightning strategy=ddp). ``exclude_hosts``:
+    hostnames to steer LSF away from (e.g. a node whose GPUs keep throwing
+    cudaErrorDevicesUnavailable across unrelated jobs -- LSF itself doesn't know it's
+    unhealthy, so it keeps getting scheduled there on retry without this)."""
     queue = queue or GPU_QUEUE
     slots = GPU_SLOTS * gpus if slots is None else slots
-    return lambda job_key: _prefix(job_key, queue, walltime, slots, gpus=gpus)
+    return lambda job_key: _prefix(job_key, queue, walltime, slots, gpus=gpus, exclude_hosts=exclude_hosts)
 
 
 def cpu(queue: "str | None" = None, walltime: str = "1:00", slots: int = 1) -> "Callable[[str], list[str]]":
