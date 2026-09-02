@@ -187,10 +187,11 @@ def render_html(
     maps job_key -> the set of content kinds its run page holds (png/table/json/log, resolved
     by dashboard._content_kinds); each gets a trailing glyph (explorer.CONTENT_SYMBOLS).
     ``reports`` holds experiment prefixes with a driver-rendered report.html under
-    ROOT/_reports (may be multi-segment, e.g. "e00/smoke"): a group row links its own report
-    and any nested under it. ``report_titles`` maps those same prefixes -> the short label
-    scraped off report.html (viz.page's ``short_title``, see dashboard._report_title); a
-    prefix without one falls back to its bare tier name, same as before this existed."""
+    ROOT/_reports (may be multi-segment, e.g. "e00/smoke"): a group row shows its own report
+    (if any) and any nested under it as three independently-aligned columns -- name | title |
+    report links. ``report_titles`` maps those same prefixes -> the short label scraped off
+    report.html (viz.page's ``short_title``, see dashboard._report_title); the title column
+    prefers the group's own title, else the first nested one that has one."""
     import html
     from urllib.parse import quote
 
@@ -208,18 +209,22 @@ def render_html(
     # to their agg row. The most recently active group is marked as the default-open one.
     newest = max(groups, key=lambda g: max(r.started_at for r in groups[g]), default=None)
     for group in sorted(groups):
-        head = html.escape(group)
-        if group in reports:
-            label = report_titles.get(group)
-            head = report_link(group, f"{group} 📈 {label}" if label else f"{group} 📈")
-        head += "".join(
-            f' <span class="mark">{report_link(r, "📈" + (report_titles.get(r) or r.split("/", 1)[1]))}</span>'
-            for r in sorted(reports) if r.startswith(f"{group}/")
+        own_report = group in reports
+        nested = sorted(r for r in reports if r.startswith(f"{group}/"))
+        name_html = report_link(group, group) if own_report else html.escape(group)
+        title = report_titles.get(group) if own_report else None
+        if not title:
+            title = next((report_titles[r] for r in nested if report_titles.get(r)), None)
+        links_html = " ".join(report_link(r, r.split("/", 1)[1]) for r in nested)
+        head = (
+            f'<span class="grp-name">{name_html}</span>'
+            f'<span class="grp-title">{html.escape(title) if title else ""}</span>'
+            f'<span class="grp-links">{links_html}</span>'
         )
         grp = html.escape(group, quote=True)
         opn = " data-open" if group == newest else ""
         rows.append(f'<tr class="group" data-grp="{grp}"{opn}>'
-                    f'<td colspan="7"><span class="tri">▸</span> {head}</td></tr>')
+                    f'<td colspan="7"><span class="tri">▸</span>{head}</td></tr>')
         rows.append(_agg_row_html(group, groups[group]))
         prev_sub = None
         for r in sorted(groups[group], key=lambda r: r.job_key):

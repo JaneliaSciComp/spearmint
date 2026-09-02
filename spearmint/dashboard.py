@@ -34,7 +34,12 @@ REFRESH_SECONDS = 10  # status-table auto-refresh (ledger mode's home page only)
 # Status-table styling on top of explorer.STYLE (which carries the theme + artifact panels).
 _STYLE = """
   #meta { color: #8b949e; margin-bottom: 12px; }
-  tr.group td { padding-top: 16px; color: #58a6ff; font-weight: 600; }
+  /* group row: name | title | report links, independently aligned columns */
+  tr.group td { padding-top: 16px; display: flex; align-items: baseline; gap: 14px; }
+  .grp-name { color: #58a6ff; font-weight: 600; flex: 0 0 auto; min-width: 70px; }
+  .grp-title { color: #58a6ff; font-weight: 400; flex: 0 0 auto; min-width: 300px; }
+  .grp-links { color: #8b949e; display: flex; gap: 10px; flex-wrap: wrap; }
+  .grp-name a, .grp-title a, .grp-links a { color: inherit; }
   /* stage links muted -- the blue bold group rows carry the visual structure */
   td.key a { color: #8b949e; } td.key a:hover { color: #c9d1d9; }
   td.key { color: #8b949e; } td.stale { color: #8b949e; }
