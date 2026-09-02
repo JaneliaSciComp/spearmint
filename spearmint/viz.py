@@ -205,6 +205,16 @@ def note(text: str) -> str:
     return f"<p class='note'>{_html.escape(text)}</p>"
 
 
+def kv(facts: "dict[str, object]", title: str = "") -> str:
+    """Two-column field/value table -> HTML fragment, for static setup facts (dataset path,
+    model hyperparameters) that don't fit table()'s metric-pivot shape (one column of values,
+    not several to compare)."""
+    rows = "".join(f"<tr><td>{_html.escape(str(k))}</td><td>{_html.escape(str(v))}</td></tr>"
+                   for k, v in facts.items())
+    t = f"<h2>{_html.escape(title)}</h2>" if title else ""
+    return f'{t}<table class="metrics"><tr><th>field</th><th>value</th></tr>{rows}</table>'
+
+
 _STYLE = """
   body { font: 14px ui-monospace, monospace; background: #0d1117; color: #c9d1d9;
          margin: 24px; max-width: 1100px; }
