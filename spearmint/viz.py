@@ -105,7 +105,10 @@ def lines(
                         "x": [xv for xv, _ in pts],
                         "y": [yv for _, yv in pts],
                         "name": " · ".join(str(v) for v in (label, yc, gval) if v not in (None, "")),
-                        "mode": "lines",
+                        # Show the actual datapoints while they're individually visible;
+                        # past ~1k per trace the markers fuse into a fat line and just hide it.
+                        "mode": "lines+markers" if len(pts) < 1000 else "lines",
+                        "marker": {"size": 4},
                         "line": {"dash": d, "color": _PALETTE[ci % len(_PALETTE)]},
                         **({"xaxis": f"x{fi + 1}", "yaxis": f"y{fi + 1}"} if fi else {}),
                     })
