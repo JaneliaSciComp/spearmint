@@ -148,6 +148,55 @@ def lines(
             f'<script type="application/json" id="{pid}-data">{payload}</script>')
 
 
+def bars(
+    series,
+    x: "str | None" = None,
+    y=None,
+    title: str = "",
+    height: "int | None" = None,
+) -> str:
+    """Multi-trace Plotly bar chart -> HTML fragment, for a CATEGORICAL x-axis (use lines()
+    instead when x is continuous/ordered -- e.g. an epoch, a swept numeric hyperparameter).
+    ``series``: {label: rows} (or one bare rows list), each row a dict. One trace per (series,
+    y column), grouped by x. ``y``: column name(s), fnmatch globs over numeric columns (default:
+    every numeric column except x)."""
+    if isinstance(series, list):
+        series = {"": series}
+    y_pats = [y] if isinstance(y, str) else y
+    traces: "list[dict]" = []
+    for li, (label, rows) in enumerate(series.items()):
+        cols = list(dict.fromkeys(c for r in rows for c in r))
+        numeric = [c for c in cols if c != x and any(_num(r.get(c)) is not None for r in rows)]
+        ys = numeric if y_pats is None else \
+            list(dict.fromkeys(c for p in y_pats for c in numeric if fnmatch(c, p)))
+        xs = [r.get(x) for r in rows] if x else list(range(len(rows)))
+        for yc in ys:
+            ci = li if len(series) > 1 else len(traces)
+            traces.append({
+                "type": "bar",
+                "x": xs,
+                "y": [_num(r.get(yc)) for r in rows],
+                "name": " · ".join(str(v) for v in (label, yc) if v not in (None, "")),
+                "marker": {"color": _PALETTE[ci % len(_PALETTE)]},
+            })
+    layout: "dict" = {
+        "margin": {"t": 24, "b": 34, "l": 56, "r": 10},
+        "paper_bgcolor": "#0d1117", "plot_bgcolor": "#161b22",
+        "font": {"color": "#c9d1d9"}, "showlegend": len(traces) > 1,
+        "legend": {"orientation": "h", "x": 0, "xanchor": "left", "y": 1.0, "yanchor": "bottom"},
+        "height": height or ROW_HEIGHT * 2,
+        "barmode": "group",
+        "uirevision": "keep",
+        "yaxis": {"title": ", ".join(y_pats) if y_pats else ""},
+        "xaxis": {"title": x or "index", "type": "category"},
+    }
+    pid = f"viz{next(_ids)}"
+    head = f"<h2>{_html.escape(title)}</h2>" if title else ""
+    payload = json.dumps({"traces": traces, "layout": layout}).replace("</", "<\\/")
+    return (f'{head}<div id="{pid}" class="vizplot" style="width:100%"></div>'
+            f'<script type="application/json" id="{pid}-data">{payload}</script>')
+
+
 def table(columns: "dict[str, dict]", metrics: "list[str] | None" = None, title: str = "",
           corner: str = "metric") -> str:
     """Pivoted metric table -> HTML fragment: {column label: {metric: value}} renders metric
