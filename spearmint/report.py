@@ -309,7 +309,10 @@ def render_html(
             marks = "".join(CONTENT_SYMBOLS[k] for k in CONTENT_SYMBOLS if k in have)
             mark = f' <span class="mark" title="{html.escape(str(sorted(have)))}">{marks}</span>' if marks else ""
             badge = f'<span class="badge {_status_class(r)}">{html.escape(_status_label(r))}</span>'
-            if r.status == "failed":  # click the red badge -> the err log
+            # Click the red badge -> the err log. Only when the log actually EXISTS ("log" in
+            # kinds is exists()-gated): a locally-run stage has no LSF -oo file -- its output
+            # went to the driver's stdout -- and a dead link is worse than none.
+            if r.status == "failed" and "log" in have:
                 badge = f'<a href="/file/{quote(lsf_log_relpath(r.job_key))}">{badge}</a>'
             key_attr = f'data-key="{html.escape(r.job_key, quote=True)}"'
             rows.append(

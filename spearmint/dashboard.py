@@ -455,13 +455,14 @@ def _run_page(job_key: str) -> str:
     if status == "failed":
         log_rel = report.lsf_log_relpath(job_key)
         log_abs = Path(rundb.root()) / log_rel
-        tail = ""
         if log_abs.exists():
             tail = "".join(log_abs.read_text(errors="replace").splitlines(keepends=True)[-50:])
-        err = (
-            f"<h3>err log <a href='/file/{quote(log_rel)}'>({html.escape(log_rel)})</a></h3>"
-            f"<pre class='err'>{html.escape(tail) or '(log not on this machine)'}</pre>"
-        )
+            err = (
+                f"<h3>err log <a href='/file/{quote(log_rel)}'>({html.escape(log_rel)})</a></h3>"
+                f"<pre class='err'>{html.escape(tail)}</pre>"
+            )
+        else:  # locally-run stage: its output went to the driver's stdout, there is no file
+            err = "<p class='note'>no err log file (stage wasn't LSF-launched; see the driver's stdout)</p>"
     body = meta + compare + err + explorer.render_dir(outdir, rundb.root())
     return _page(body, live=False, title=job_key)
 
