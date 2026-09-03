@@ -102,6 +102,34 @@ def collect() -> "dict[str, list[JobRow]]":
     return groups
 
 
+@dataclass
+class RunRow:
+    """One ledger run, for the dashboard's per-stage runs table."""
+    run_id: int
+    status: str
+    lsf_state: "str | None"
+    started_at: str
+    ended_at: "str | None"
+    duration: timedelta
+    commit_id: str
+    outdir: str  # ROOT-relative (extend/replace reuse dirs, so this is NOT run{run_id})
+
+
+def collect_runs() -> "dict[str, list[RunRow]]":
+    """Every ledger run grouped by job_key, newest first -- one scan, like collect()."""
+    conn = rundb._connect(readonly=True)
+    rows = conn.execute(
+        "SELECT run_id, job_key, status, lsf_state, started_at, ended_at, commit_id, outdir "
+        "FROM runs ORDER BY run_id DESC"
+    ).fetchall()
+    conn.close()
+    out: "dict[str, list[RunRow]]" = {}
+    for rid, jk, status, lsf_state, started, ended, commit, outdir in rows:
+        out.setdefault(jk, []).append(RunRow(rid, status, lsf_state, started, ended,
+                                             rundb._duration(started, ended), commit or "", outdir))
+    return out
+
+
 def render(groups: "dict[str, list[JobRow]]") -> str:
     """Fixed-width terminal table, one section per experiment group. A wip row with LSF
     dispatch detail shows it inline -- wip(PEND) queued vs wip(RUN <host>) actually running.
@@ -221,12 +249,15 @@ def render_html(
     kinds: "dict[str, set[str]] | None" = None,
     reports: "set[str] | None" = None,
     report_titles: "dict[str, str] | None" = None,
+    runs: "dict[str, list[RunRow]] | None" = None,
 ) -> str:
     """The status view as an HTML fragment (no <html>/<head> shell -- dashboard.py wraps it,
-    and swaps just this fragment in on each refresh): TWO tables. #exps has one row per
-    experiment group -- shortname | name | report title | report links | aggregates -- and
-    #stages holds every group's stage rows; the dashboard's select script shows only the
-    clicked experiment's stages (most recently active one on first paint, via ``data-open``).
+    and swaps just this fragment in on each refresh): THREE tables. #exps has one row per
+    experiment group -- shortname | report title | report links | aggregates -- and #stages
+    holds every group's stage rows; the dashboard's select script shows only the clicked
+    experiment's stages (most recently active one on first paint, via ``data-open``).
+    Clicking a stage shows #runs: that job_key's every ledger attempt (``runs``, from
+    collect_runs()) -- id, status, runtime, started/ended, commit, linked run dir.
     Each stage links to its run page (/run/<job_key>); a failed stage's badge links to its err
     log (/file/<lsf log>) -- both dashboard.py routes. ``kinds`` maps job_key -> the set of
     content kinds its run page holds (png/table/json/log, resolved by
@@ -246,6 +277,7 @@ def render_html(
     report_titles = report_titles or {}
     exp_rows = []
     rows = []
+    run_rows = []
 
     def report_link(prefix: str, text: str) -> str:
         return f'<a href="/file/{quote(f"_reports/{prefix}/report.html")}">{html.escape(text)}</a>'
@@ -279,8 +311,9 @@ def render_html(
             badge = f'<span class="badge {_status_class(r)}">{html.escape(_status_label(r))}</span>'
             if r.status == "failed":  # click the red badge -> the err log
                 badge = f'<a href="/file/{quote(lsf_log_relpath(r.job_key))}">{badge}</a>'
+            key_attr = f'data-key="{html.escape(r.job_key, quote=True)}"'
             rows.append(
-                f'<tr{brk} data-grp="{html.escape(group, quote=True)}">'
+                f'<tr{brk} data-grp="{html.escape(group, quote=True)}" {key_attr}>'
                 f'<td class="key"><a href="{key_link}">{html.escape(r.job_key)}</a>{mark}</td>'
                 f"<td>{badge}</td>"
                 f"<td>{r.n_runs}</td>"
@@ -290,6 +323,24 @@ def render_html(
                 f'<td class="stale">{html.escape(stale)}</td>'
                 "</tr>"
             )
+            for rr in (runs or {}).get(r.job_key, []):
+                lbl = f"wip({rr.lsf_state})" if rr.status == "wip" and rr.lsf_state else rr.status
+                rbadge = (f'<span class="badge {_status_class_for(rr.status, rr.lsf_state)}">'
+                          f"{html.escape(lbl)}</span>")
+                run_rows.append(
+                    f"<tr {key_attr}>"
+                    f"<td>{rr.run_id}</td>"
+                    f"<td>{rbadge}</td>"
+                    f"<td>{_fmt_td(rr.duration)}</td>"
+                    f"<td>{fmt_ts(rr.started_at)}</td>"
+                    f"<td>{fmt_ts(rr.ended_at)}</td>"
+                    f"<td>{html.escape(rr.commit_id[:12])}</td>"
+                    # The DIR is its own column (linked): extend/replace reuse an earlier
+                    # run's directory, so it routinely differs from run{run_id}.
+                    f'<td class="key"><a href="/dir/{quote(rr.outdir)}">'
+                    f"{html.escape(rr.outdir.split('/')[-1])}</a></td>"
+                    "</tr>"
+                )
     exp_header = (
         "<tr><th>exp</th><th>title</th><th>reports</th><th>stages</th>"
         "<th>status</th><th>runs</th><th>total</th><th>avg</th><th>last</th><th>stale</th></tr>"
@@ -298,8 +349,15 @@ def render_html(
         "<tr><th>stage</th><th>status</th><th>runs</th><th>total</th><th>avg</th>"
         "<th>last</th><th>stale</th></tr>"
     )
+    run_header = (
+        "<tr><th>id</th><th>status</th><th>runtime</th><th>started</th><th>ended</th>"
+        "<th>commit</th><th>dir</th></tr>"
+    )
+    # #runs starts hidden: the dashboard's select script shows it (and the right rows) once a
+    # stage is clicked in #stages.
     return (f'<table id="exps">{exp_header}{"".join(exp_rows)}</table>'
-            f'<table id="stages">{header}{"".join(rows)}</table>')
+            f'<table id="stages">{header}{"".join(rows)}</table>'
+            f'<table id="runs" style="display:none">{run_header}{"".join(run_rows)}</table>')
 
 
 if __name__ == "__main__":

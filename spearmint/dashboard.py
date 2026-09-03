@@ -39,8 +39,9 @@ _STYLE = """
   td.full { color: #58a6ff; }
   td.rep { color: #8b949e; } td.rep a { color: inherit; }
   tr.exp { cursor: pointer; }
-  tr.exp.sel td { background: #161b22; }
-  #stages { margin-top: 22px; }
+  tr.exp.sel td, #stages tr.sel td { background: #161b22; }
+  #stages tr { cursor: pointer; }
+  #stages, #runs { margin-top: 22px; }
   /* stage links muted -- the blue experiment rows carry the visual structure */
   td.key a { color: #8b949e; } td.key a:hover { color: #c9d1d9; }
   td.key { color: #8b949e; } td.stale { color: #8b949e; }
@@ -86,11 +87,13 @@ _SORT_JS = """
                                            function(r){ return !r.querySelector("th"); });
     var blocks = [], prev = null;
     rows.forEach(function(r){
-      var brk = table.id !== "exps" &&
-                (r.dataset.grp !== prev || r.classList.contains("subbreak"));
+      // Sort segments: #exps one flat block; #stages per experiment + subbreak tier;
+      // #runs per stage (rows of different job_keys never intermix).
+      var pk = table.id === "runs" ? r.dataset.key : r.dataset.grp;
+      var brk = table.id !== "exps" && (pk !== prev || r.classList.contains("subbreak"));
       if (!blocks.length || brk) blocks.push([]);
       blocks[blocks.length - 1].push(r);
-      prev = r.dataset.grp;
+      prev = pk;
     });
     var body = table.tBodies[0] || table, prevGrp = null;
     blocks.forEach(function(block){
@@ -100,7 +103,7 @@ _SORT_JS = """
       });
       block.forEach(function(r, ri){
         // subbreak = later tier of the SAME experiment; a new experiment's first block isn't one
-        if (table.id !== "exps") r.classList.toggle("subbreak", ri === 0 && r.dataset.grp === prevGrp);
+        if (table.id === "stages") r.classList.toggle("subbreak", ri === 0 && r.dataset.grp === prevGrp);
         body.appendChild(r);
       });
       prevGrp = block[block.length - 1].dataset.grp;
@@ -110,11 +113,14 @@ _SORT_JS = """
   window.spSort = applyAll;
 
   // Selecting a row in the experiments table shows that experiment's stages in the stages
-  // table. First paint selects the server-suggested row (data-open = most recent activity);
-  // after that the user's choice is sticky across /table swaps.
-  var sel = null, selInit = false;
+  // table; selecting a stage row shows its ledger attempts in the runs table (click again to
+  // hide; switching experiment clears it). First paint selects the server-suggested
+  // experiment (data-open = most recent activity); after that both choices are sticky across
+  // /table swaps.
+  var sel = null, selInit = false, selKey = null;
   function select(){
-    var exps = document.getElementById("exps"), stages = document.getElementById("stages");
+    var exps = document.getElementById("exps"), stages = document.getElementById("stages"),
+        runs = document.getElementById("runs");
     if (!exps || !stages) return;
     if (!selInit) {
       var d = exps.querySelector("tr[data-open]");
@@ -126,13 +132,27 @@ _SORT_JS = """
       r.onclick = function(e){
         if (e.target.closest("a")) return;  // report links still navigate
         sel = r.dataset.grp;
+        selKey = null;
         select();
       };
     });
     stages.querySelectorAll("tr").forEach(function(r){
       if (!r.dataset.grp) return;  // the <th> header row
       r.style.display = r.dataset.grp === sel ? "" : "none";
+      r.classList.toggle("sel", r.dataset.key === selKey);
+      r.onclick = function(e){
+        if (e.target.closest("a")) return;  // stage/badge links still navigate
+        selKey = (selKey === r.dataset.key) ? null : r.dataset.key;
+        select();
+      };
     });
+    if (runs) {
+      runs.style.display = selKey ? "" : "none";
+      runs.querySelectorAll("tr").forEach(function(r){
+        if (!r.dataset.key) return;  // the <th> header row
+        r.style.display = r.dataset.key === selKey ? "" : "none";
+      });
+    }
   }
   window.spSel = select;
 
@@ -148,6 +168,7 @@ _SORT_JS = """
     var i = rows.findIndex(function(r){ return r.dataset.grp === sel; });
     var j = i < 0 ? 0 : Math.min(rows.length - 1, Math.max(0, i + (e.key === "ArrowDown" ? 1 : -1)));
     sel = rows[j].dataset.grp;
+    selKey = null;  // stage selection belongs to the experiment it was made in
     select();
   });
   applyAll();
@@ -243,7 +264,8 @@ def _table() -> str:
     kinds = {k: v for k, v in kinds.items() if v}  # only stages that actually have something
     reports = _reports()
     titles = {prefix: _report_title(prefix) for prefix in reports}
-    return report.render_html(groups, kinds=kinds, reports=reports, report_titles=titles)
+    return report.render_html(groups, kinds=kinds, reports=reports, report_titles=titles,
+                              runs=report.collect_runs())
 
 
 # --- run diff ------------------------------------------------------------------------------
@@ -454,6 +476,21 @@ class _LedgerHandler(explorer.Handler):
             self._serve_file(unquote(self.path[len("/file/"):]), rundb.root())
         elif self.path.startswith("/run/"):
             self._send(_run_page(unquote(self.path[len("/run/"):])))
+        elif self.path.startswith("/dir/"):
+            # A SPECIFIC run's directory (the runs table links here) -- /run/<job_key> only
+            # ever shows the latest attempt's dir.
+            rel = unquote(self.path[len("/dir/"):])
+            try:
+                d = explorer._safe(rundb.root(), rel)
+            except AssertionError:
+                self.send_error(403)
+                return
+            if not d.is_dir():
+                self.send_error(404)
+                return
+            body = (f"<p><a href='/'>&larr; all stages</a></p>"
+                    + explorer.render_dir(str(d), rundb.root()))
+            self._send(_page(body, live=False, title=rel))
         elif self.path.startswith("/diff"):
             self._send(_diff_page(urlsplit(self.path).query, ledger=True, base=rundb.root()))
         else:
