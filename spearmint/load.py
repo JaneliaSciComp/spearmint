@@ -15,6 +15,7 @@ exists rather than die on the 10% that doesn't yet."""
 import csv
 import io
 import json as _json
+import os
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -65,6 +66,16 @@ def json_file(path) -> dict:
     except ValueError:
         got = {}
     return got if isinstance(got, dict) else {}
+
+
+def report_dir(name: str) -> str:
+    """Where a report script writes report.html: $SPEARMINT_RUN_OUTDIR when the driver runs
+    it as the managed report STAGE (a fresh, versioned run dir -- one per change of the
+    experiment's results, old versions never overwritten), else ROOT/_reports/<name>/ -- the
+    LIVE view the dashboard links, written by driver ticks and hand runs. Created if missing."""
+    d = os.environ.get("SPEARMINT_RUN_OUTDIR") or f"{rundb.root()}/{rundb.REPORTS_DIR}/{name}"
+    Path(d).mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def filenames(dirs, pattern: str = "*.png") -> "list[str]":

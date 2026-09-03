@@ -140,7 +140,13 @@ every ~2 minutes while anything runs, and once at the end — the report stays f
 long run (with `refresh=`, an open tab tracks it), and because every render is a fresh
 process, you can edit the report — structure and all — WHILE the experiment runs. `load`
 returns empty collections for missing/torn files (live renders race with writers), so partial
-runs render their finished parts with no guards. A failing render prints an error and never
+runs render their finished parts with no guards.
+
+The report is also a real stage (`<prefix>/report`, depending on every other stage): whenever
+the experiment's results change, it re-runs into a fresh, versioned run dir — rerunning an
+experiment never loses the old report; the version history sits in the dashboard's runs table
+like any stage's. Write via `load.report_dir(name)` so the script lands in the versioned dir
+when the driver runs it as that stage and in the live `_reports/<name>/` otherwise. A failing render prints an error and never
 delays a stage. Heavy rendering (slice PNGs etc.) belongs in a normal stage; the report just
 embeds the results. See `spearmint/examples/toy_report.py` + `toy_report_demo.py`.
 

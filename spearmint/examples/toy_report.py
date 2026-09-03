@@ -1,17 +1,21 @@
 #!/usr/bin/env python
-"""Standalone report script for toy_report_demo: ledger + run dirs -> static
-ROOT/_reports/e05_report/report.html. The driver shells out to this on every stage finalize
-and tick, and the SAME file runs by hand -- mid-run, after the run, or a week later with new
-report code (every render is a fresh process, so edits just take effect):
+"""Standalone report script for toy_report_demo: ledger + run dirs -> a static report.html.
+The driver shells out to this on every stage finalize and tick (writing the LIVE view at
+ROOT/_reports/e05_report/), runs it once more as the managed REPORT STAGE when the results
+changed (writing a fresh, versioned run dir -- old reports are never lost), and the SAME file
+runs by hand -- mid-run, after the run, or a week later with new report code (every render is
+a fresh process, so edits just take effect):
 
     uv run python spearmint/examples/toy_report.py
 
-spearmint.load absorbs the live races (missing/torn files -> empty collections), so there is
-nothing to guard here -- render what exists, the next rebuild fills in the rest."""
+load.report_dir() picks the right destination (versioned run dir when the driver set
+$SPEARMINT_RUN_OUTDIR, live _reports/ otherwise). spearmint.load absorbs the live races
+(missing/torn files -> empty collections), so there is nothing to guard here -- render what
+exists, the next rebuild fills in the rest."""
 
 from pathlib import Path
 
-from spearmint import load, rundb, viz
+from spearmint import load, viz
 
 PREFIX = "e05_report"
 
@@ -30,9 +34,7 @@ def main() -> None:
         title=PREFIX,
         refresh=1 if missing else None,
     )
-    out = Path(rundb.root()) / rundb.REPORTS_DIR / PREFIX
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "report.html").write_text(html)
+    (Path(load.report_dir(PREFIX)) / "report.html").write_text(html)
 
 
 if __name__ == "__main__":

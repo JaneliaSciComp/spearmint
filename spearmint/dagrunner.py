@@ -144,10 +144,13 @@ class Experiment:
         # experiment's cmd_prefix, so the project env), and the same file runs by hand --
         # during a run, after it, or a week later with new report code; every render is a
         # fresh process, so editing it mid-run just works. Build it with spearmint.load +
-        # spearmint.viz and write ROOT/_reports/<name>/report.html (linked from the status
-        # table). A plain function ``fn(savedir) -> html`` also works for one-file demos
-        # (written to _reports/<prefix>/report.html for you) but is fixed for the run's
-        # lifetime. Either way a failing render prints and the DAG carries on.
+        # spearmint.viz and write report.html into load.report_dir(<name>). The script is
+        # ALSO a real stage ("<prefix>/report", depending on every other stage): when results
+        # change it re-runs into a fresh, VERSIONED run dir -- old reports are never lost --
+        # while tick/hand renders keep the live _reports/<name>/report.html current (what the
+        # status table links). A plain function ``fn(savedir) -> html`` also works for
+        # one-file demos (live view only, no versioning, fixed for the run's lifetime).
+        # Either way a failing render prints and the DAG carries on.
         self.report: "Callable[[Callable], str] | str | None" = None
 
     def Stage(
@@ -185,8 +188,22 @@ class Experiment:
         extend: "list[Stage] | None" = None,
         replace: "list[Stage] | None" = None,
     ) -> "dict[str, str]":
+        report_cmd = report_force = None
+        report_key = f"{self.prefix}/report"
+        if isinstance(self.report, str):
+            assert not any(s.name == "report" for s in self.stages), (
+                f"experiment {self.prefix!r} has a stage named 'report' AND e.report set -- "
+                f"the report stage claims that job_key; rename the stage"
+            )
+            report_cmd = [*self.cmd_prefix, self.report]
+            # aio's skip rule is done + no-dep-ran-THIS-session: a dep rerun by an earlier or
+            # concurrent driver leaves the report stale-but-skippable, so staleness forces a
+            # fresh version here.
+            report_force = "new" if rundb.stale_inputs(report_key) else None
         return run_experiment(self.stages, new=new, extend=extend, replace=replace,
-                              on_update=self._render_report if self.report else None)
+                              on_update=self._render_report if self.report else None,
+                              report_cmd=report_cmd, report_key=report_key,
+                              report_force=report_force)
 
     def savedir(self, stage: "Stage | str") -> "str | None":
         """A stage's latest DONE outdir (by object or name), or None -- what a report fn keys
@@ -352,6 +369,9 @@ def run_experiment(
     extend: "list[Stage] | None" = None,
     replace: "list[Stage] | None" = None,
     on_update: "Callable[[], object] | None" = None,
+    report_cmd: "list[str] | None" = None,
+    report_key: str = "",
+    report_force: "str | None" = None,
 ) -> "dict[str, str]":
     """Lower the static plan onto the aio core and run it to completion. Every stage becomes
     one ``aio.Ctx.submit`` whose deps are its local requires -- ordering, skip-if-done, the
@@ -366,7 +386,12 @@ def run_experiment(
     for what each mode means for the outdir); their dependents re-run as "new" automatically.
     A stage that isn't done and isn't forced defaults to "replace" (only reachable with no
     done row, so it can only clear a failed/wip attempt -- keeps the debug loop from littering
-    one orphan dir per attempt). Returns {job_key: done|skipped|failed|abandoned}."""
+    one orphan dir per attempt). Returns {job_key: done|skipped|failed|abandoned}.
+
+    ``report_cmd``/``report_key``/``report_force`` (set by Experiment.run when e.report is a
+    script): the report is submitted as a REAL stage depending on every other job -- a rerun
+    dep cascades it to mode "new", so each version lands in its own run dir (old reports are
+    never lost), its ledger inputs make staleness exact, and it skips when nothing changed."""
     local = set(stages)
     seeds_all = [s for group in (replace, extend, new) if group for s in group]
     assert len(seeds_all) == len(set(seeds_all)), (
@@ -393,10 +418,12 @@ def run_experiment(
         )
 
     assert rundb._ANCHOR is not None  # Experiment() anchored when the stages were declared
-    return asyncio.run(_run_plan(order, local, seed_mode, on_update))
+    return asyncio.run(_run_plan(order, local, seed_mode, on_update,
+                                 report_cmd, report_key, report_force))
 
 
-async def _run_plan(order, local, seed_mode, on_update) -> "dict[str, str]":
+async def _run_plan(order, local, seed_mode, on_update,
+                    report_cmd=None, report_key="", report_force=None) -> "dict[str, str]":
     anchor = rundb._ANCHOR
     assert anchor is not None
     ctx = aio.Ctx(prefix="", cmd_prefix=[], repo=anchor.repo or anchor.root, root=anchor.root,
@@ -441,20 +468,33 @@ async def _run_plan(order, local, seed_mode, on_update) -> "dict[str, str]":
         ticker = asyncio.create_task(_tick())
     update()  # initial render: the report exists (all-waiting) from the first second
 
-    results = await asyncio.gather(*(jobs[s]._task for s in order), return_exceptions=True)
+    # The report as a REAL stage, depending on every job: a rerun dep cascades it to "new"
+    # (fresh run dir per version -- old reports survive), inputs record the exact dep run_ids,
+    # skip-if-fresh applies. Submitted after the finalize-callback wiring above on purpose:
+    # its own completion needn't trigger another live render (the final update() below runs
+    # regardless). Its subprocess gets SPEARMINT_RUN_OUTDIR, steering load.report_dir into
+    # the versioned dir; tick renders (no identity) keep writing the live _reports file.
+    rjob = None
+    if report_cmd is not None:
+        rjob = ctx.submit("report", cmd=report_cmd, deps=list(jobs.values()),
+                          key=report_key, force=report_force)
+
+    tasks = [jobs[s]._task for s in order] + ([rjob._task] if rjob is not None else [])
+    results = await asyncio.gather(*tasks, return_exceptions=True)
     if ticker is not None:
         ticker.cancel()
     update()  # final render: every stage finalized
 
     status: "dict[str, str]" = {}
-    for s, res in zip(order, results):
+    keyed = [(s.job_key, jobs[s]) for s in order] + ([(report_key, rjob)] if rjob is not None else [])
+    for (job_key, job), res in zip(keyed, results):
         if isinstance(res, aio.JobFailed):
-            st = "failed" if res.job_key == s.job_key else "abandoned"
+            st = "failed" if res.job_key == job_key else "abandoned"
             if st == "abandoned":
-                print(f"[abandon] {s.name}: upstream failed/abandoned", flush=True)
+                print(f"[abandon] {job.name}: upstream failed/abandoned", flush=True)
         elif isinstance(res, BaseException):
             raise res  # ctrl-c / unexpected errors propagate, never swallowed into a status
         else:
-            st = "done" if jobs[s].ran else "skipped"
-        status[s.job_key] = st
+            st = "done" if job.ran else "skipped"
+        status[job_key] = st
     return status
