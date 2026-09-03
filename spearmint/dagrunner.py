@@ -239,9 +239,9 @@ class Experiment:
         ride along (and the DAG was already built by the time we submit, so definition errors
         fail here on your terminal, not minutes later in a driver log) -- and ``-r``/``--report``
         re-renders report.html from the CURRENT ledger state and exits, reading only: no stage
-        is ever submitted, even a never-run one (bare invocation defaults every not-done stage
-        to mode "replace" and launches it for real -- ``--report`` is the safe alternative when
-        you just want to see the current report). Returns run()'s status dict, or None when it
+        is ever submitted, even a never-run one (bare invocation launches every stage whose
+        latest attempt isn't done -- ``--report`` is the safe alternative when you just want
+        to see the current report). Returns run()'s status dict, or None when it
         only submitted or only rendered the report.
 
         ``argv`` defaults to sys.argv[1:]; an experiment file with its own args (a tier, a
@@ -384,9 +384,10 @@ def run_experiment(
 
     ``new``/``extend``/``replace`` force the named stages despite being done (see rundb._start
     for what each mode means for the outdir); their dependents re-run as "new" automatically.
-    A stage that isn't done and isn't forced defaults to "replace" (only reachable with no
-    done row, so it can only clear a failed/wip attempt -- keeps the debug loop from littering
-    one orphan dir per attempt). Returns {job_key: done|skipped|failed|abandoned}.
+    A stage whose LATEST attempt isn't done and that isn't forced launches as "new" -- a fresh
+    dir every attempt, so a failed run's dir (and one day its log) survives as evidence, and a
+    failure after an older success reruns instead of hiding behind it. Returns
+    {job_key: done|skipped|failed|abandoned}.
 
     ``report_cmd``/``report_key``/``report_force`` (set by Experiment.run when e.report is a
     script): the report is submitted as a REAL stage depending on every other job -- a rerun

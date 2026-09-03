@@ -539,8 +539,12 @@ def latest_outdir(job_key: str, status: "str | None" = None) -> "str | None":
 
 
 def is_done(job_key: str) -> bool:
-    """True iff the most recent run tagged ``job_key`` completed successfully."""
-    return latest_outdir(job_key, status="done") is not None
+    """True iff the MOST RECENT run tagged ``job_key`` completed successfully. Latest-attempt
+    semantics on purpose: a stage whose last run failed reruns by default even when an older
+    success exists -- the red badge in the dashboard and the scheduler's skip decision must
+    tell the same story. (An older success still stands for readers: savedir/latest_outdir
+    (status="done") and staleness all keep resolving to the latest DONE run.)"""
+    return _latest("status", job_key, None) == "done"
 
 
 def started_at(job_key: str, status: "str | None" = None) -> "str | None":

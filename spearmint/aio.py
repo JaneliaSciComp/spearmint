@@ -194,7 +194,9 @@ class Job:
                 self.skipped = True
                 _skip_print(self.name, self.job_key)
                 return self._row.outdir
-            self._mode = forced or ("new" if dep_ran else "replace")
+            # Unforced launches default to "new": a failed last attempt keeps its dir (and
+            # one day its log) as evidence -- clearing it was worse than the orphan dirs.
+            self._mode = forced or "new"
             if self._stopping:
                 raise JobFailed(self.job_key, "cancelled before start")
             self._resolve_spec()
@@ -279,8 +281,10 @@ class Ctx:
         ``cmd_prefix`` overrides the ctx-wide one (a list, or a callable receiving the job_key
         -- lsf.gpu()/cpu() work unchanged). ``key``/``force`` are the AOT layer's hooks: a full
         job_key override, and an explicit mode bypassing the CLI pattern matching. Skip rule
-        mirrors the DAG scheduler: done row + not forced + no dep re-ran this session -> skip;
-        a not-done job defaults to mode "replace", a force/cascade to its named mode/"new"."""
+        mirrors the DAG scheduler: LATEST attempt done + not forced + no dep re-ran this
+        session -> skip (a failed last attempt reruns even over an older success); every
+        unforced launch defaults to mode "new" -- a fresh dir, the failed attempt kept as
+        evidence -- and a force/cascade uses its named mode."""
         deps = tuple(deps)
         job_key = key or f"{self.prefix}/{name}"
         assert job_key not in self._jobs, f"job {job_key!r} submitted twice"
@@ -309,7 +313,7 @@ class Ctx:
                 job._task = asyncio.get_running_loop().create_task(_done(job._row.outdir))
                 return job
             if rundb.latest_outdir(job_key, status="wip") is None:
-                job._mode = forced or "replace"
+                job._mode = forced or "new"  # fresh dir; a failed attempt's dir stays as evidence
                 job._resolve_spec()
                 self._insert_row(job, deps)
         job._task = asyncio.get_running_loop().create_task(job._run(deps, forced))
