@@ -197,28 +197,35 @@ class Experiment:
         assert s is not None, f"no stage named {stage!r} in experiment {self.prefix!r}"
         return rundb.latest_outdir(s.job_key, status="done")
 
-    def _render_report(self) -> None:
-        assert self.report is not None
+    def _render_report(self) -> "Path | None":
+        assert self.report is not None, \
+            f"{self.prefix}: no report renderer registered (set e.report = ...)"
         if isinstance(self.report, str):
             # Fresh process per render: the script picks up its own edits, its stderr flows
             # through the driver's log, and a hang can't wedge the scheduler (generous cap --
             # a report is file reads + HTML). check=True routes failure into run_experiment's
             # [report] guard.
             subprocess.run([*self.cmd_prefix, self.report], check=True, timeout=600)
-            return
+            return None
         out = Path(rundb.root()) / rundb.REPORTS_DIR / self.prefix
         out.mkdir(parents=True, exist_ok=True)
-        (out / "report.html").write_text(self.report(self.savedir))
+        path = out / "report.html"
+        path.write_text(self.report(self.savedir))
+        return path
 
     def main(self, argv: "list[str] | None" = None) -> "dict[str, str] | None":
         """The standard experiment-file entrypoint -- spearmint's own flags, parsed explicitly
         (never sniffed from a library call): ``--new/--extend/--replace STAGE`` (repeatable)
-        force stages by name (see run_experiment for what each mode means), and ``--submit``
+        force stages by name (see run_experiment for what each mode means), ``--submit``
         submits this same invocation as the long-lived LSF driver job instead of running
         in-process -- the driver re-runs sys.argv minus --submit, so the tier and force flags
         ride along (and the DAG was already built by the time we submit, so definition errors
-        fail here on your terminal, not minutes later in a driver log). Returns run()'s status
-        dict, or None when it only submitted.
+        fail here on your terminal, not minutes later in a driver log) -- and ``-r``/``--report``
+        re-renders report.html from the CURRENT ledger state and exits, reading only: no stage
+        is ever submitted, even a never-run one (bare invocation defaults every not-done stage
+        to mode "replace" and launches it for real -- ``--report`` is the safe alternative when
+        you just want to see the current report). Returns run()'s status dict, or None when it
+        only submitted or only rendered the report.
 
         ``argv`` defaults to sys.argv[1:]; an experiment file with its own args (a tier, a
         worker dispatch) parses them first and hands over the remainder:
@@ -241,7 +248,16 @@ class Experiment:
                        help="force STAGE(s) (+ dependents), clearing the existing dir first; globs ok")
         p.add_argument("--submit", action="store_true",
                        help="submit this invocation as the LSF driver job (login node)")
+        p.add_argument("-r", "--report", action="store_true",
+                       help="render the report from the current ledger state and exit -- "
+                            "reads only, submits/runs nothing (takes priority over --submit; "
+                            "--new/--extend/--replace are ignored)")
         a = p.parse_args(sys.argv[1:] if argv is None else argv)
+        if a.report:
+            path = self._render_report()
+            if path:
+                print(f"report rendered: {path}")
+            return None
         if a.submit:
             from . import lsf  # local-only experiments never need the LSF module
 
@@ -335,7 +351,7 @@ def run_experiment(
     new: "list[Stage] | None" = None,
     extend: "list[Stage] | None" = None,
     replace: "list[Stage] | None" = None,
-    on_update: "Callable[[], None] | None" = None,
+    on_update: "Callable[[], object] | None" = None,
 ) -> "dict[str, str]":
     """Lower the static plan onto the aio core and run it to completion. Every stage becomes
     one ``aio.Ctx.submit`` whose deps are its local requires -- ordering, skip-if-done, the
