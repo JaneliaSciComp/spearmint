@@ -103,6 +103,7 @@ class Job:
         self._prefix: "list[str]" = []
         self._cmd = None
         self._outdir_args: "list[str] | None" = None
+        self._env: "dict[str, str]" = {}
         self._base_cmd: "list[str]" = []
         self._argv: "list[str]" = []  # what the ledger records
         self._row: "rundb.Run | None" = None
@@ -181,6 +182,7 @@ class Job:
             f"SPEARMINT_MODE={self._mode}",
             f"SPEARMINT_RUN_ROW={row.run_id}",
             f"SPEARMINT_RUN_OUTDIR={row.outdir}",
+            *(f"{k}={v}" for k, v in self._env.items()),
             *inputs_env,
             *base,
             *(a.format(row.outdir) for a in self._outdir_args or []),
@@ -290,7 +292,8 @@ class Ctx:
 
     def submit(self, name: str, cmd, deps: "tuple[Job, ...] | list[Job]" = (),
                cmd_prefix=None, outdir_args: "list[str] | None" = None,
-               key: "str | None" = None, force: "str | None" = None) -> Job:
+               key: "str | None" = None, force: "str | None" = None,
+               env: "dict[str, str] | None" = None) -> Job:
         """Submit a job (ledger-memoized). ``cmd`` is the worker's own argv -- a list, or a
         CALLABLE returning one, evaluated only after ``deps`` are done (so it may reference
         their savedirs: the Stage-lambda pattern). ``deps`` are awaited before launch,
@@ -314,6 +317,7 @@ class Ctx:
         )
         job._cmd = cmd
         job._outdir_args = outdir_args
+        job._env = dict(env or {})
         if not deps:
             # Dep-free jobs decide NOW when they can: a done row skips immediately (even if a
             # NEWER attempt is live under another driver -- a completed result exists), and a

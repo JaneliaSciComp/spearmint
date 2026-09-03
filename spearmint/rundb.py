@@ -115,11 +115,6 @@ def _db_path() -> str:
     return f"{root()}/rundb.db"
 
 
-# Experiment reports live at ROOT/_reports/<prefix>/report.html (prefix "/"s are real
-# subdirs) -- written by the driver (dagrunner Experiment.report), linked by the dashboard.
-REPORTS_DIR = "_reports"
-
-
 @dataclass
 class Run:
     run_id: int
@@ -435,6 +430,19 @@ def start_managed(job_key: str, mode: str, argv: "list[str]", inputs: "list[int]
 def finish_managed(run_id: int, ok: bool) -> None:
     """The driver-side close of a managed run, from the stage process's exit status."""
     _finish(run_id, "done" if ok else "failed")
+
+
+def set_inputs(run_id: int, inputs: "list[int]") -> None:
+    """Set a managed run's final input provenance.
+
+    Ordinary stages know their inputs when they start. A sidecar report starts before the
+    stages it observes have all minted rows, so its exact inputs are filled in at finalize.
+    """
+    with _DB_LOCK:
+        conn = _connect()
+        with conn:
+            conn.execute("UPDATE runs SET inputs = ? WHERE run_id = ?", (json.dumps(inputs), run_id))
+        conn.close()
 
 
 def set_lsf_jobid(run_id: int, jobid: str) -> None:

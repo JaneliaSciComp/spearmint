@@ -46,8 +46,10 @@ async def main(ctx: aio.Ctx) -> None:
             for f in Path(job.outdir).glob("*.jsonl"):
                 curves[f"{job.name}:{f.stem}"] = \
                     [json.loads(ln) for ln in f.read_text().splitlines()]
-        out = Path(rundb.root()) / rundb.REPORTS_DIR / ctx.prefix
-        out.mkdir(parents=True, exist_ok=True)
+        # This raw aio demo has no managed report Stage; keep its ad-hoc human-only view with
+        # the training attempt it describes. Experiment.report provides versioned sidecar
+        # lifecycle when that identity/history matters.
+        out = Path(train.outdir)
         (out / "report.html").write_text(viz.page(
             viz.lines(curves, x="step", logy=True, title="train + val, live"),
             title=ctx.prefix, refresh=2 if live else None,

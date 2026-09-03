@@ -1,7 +1,7 @@
 """Python-native report building: compose an HTML report from data YOUR code already loaded
-and shaped -- ``viz.page(viz.lines(...), viz.table(...), viz.images(...))`` -- and hand it to
-the driver via ``e.report = fn`` (see dagrunner: the fn re-renders as stages finish and on a
-timer, so the report stays fresh through a long run). Helpers take PYTHON DATA (lists of row
+and shaped -- ``viz.page(viz.lines(...), viz.table(...), viz.images(...))`` -- from a function
+stage assigned with ``e.report = e.Stage("report", fn=render)``. The driver reinvokes it as
+stages finish and on a timer, into one live report run directory. Helpers take PYTHON DATA (lists of row
 dicts, dicts of scalars), never file paths or spec dicts: loading, filtering, renaming, math
 happen in your experiment file with the whole language. Stdlib-only; plots are Plotly via CDN.
 

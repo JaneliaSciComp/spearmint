@@ -118,37 +118,29 @@ usual — so you can force-rerun a failed stage while a long train keeps running
 
 ### Experiment reports (Python, live)
 
-A report is a standalone script: `spearmint.load` turns the ledger + run dirs into plain
-Python data, `spearmint.viz` turns that into HTML — munge whatever you like in between with
-the whole language:
+A report is a function stage defined beside the experiment. `spearmint.load` turns the ledger
+and run dirs into plain Python data; `spearmint.viz` turns that into HTML:
 
 ```python
-# my_report.py — runs by hand anytime: during a run, after it, next month with new report code
-rr = load.runs("my_exp/*")                                     # {job_key: latest done outdir}
-html = viz.page(
-    viz.lines({k: load.rows(f"{d}/metrics.jsonl") for k, d in rr.items()},
-              x="step", y=["loss", "val_*"], dash={"val_*": "dash"}, logy=True),
-    viz.table({k: load.json_file(f"{d}/summary.json") for k, d in rr.items()}),
-    viz.images(slices_dir, rows=["raw", "gt", "pred"], cols=[10250, 10500]),
-    title="my_exp", refresh=60,
-)
-Path(f"{rundb.root()}/_reports/my_exp/report.html").write_text(html)
+def render(run):
+    rr = load.runs("my_exp/*")
+    html = viz.page(
+        viz.lines({k: load.rows(f"{d}/metrics.jsonl") for k, d in rr.items()},
+                  x="step", y=["loss", "val_*"], logy=True),
+        viz.table({k: load.json_file(f"{d}/summary.json") for k, d in rr.items()}),
+        title="my_exp",
+    )
+    Path(run.outdir, "report.html").write_text(html)
+
+e.report = e.Stage("report", fn=render)
 ```
 
-Assign `e.report = "my_report.py"` and the driver shells out to it after every stage finishes,
-every ~2 minutes while anything runs, and once at the end — the report stays fresh through a
-long run (with `refresh=`, an open tab tracks it), and because every render is a fresh
-process, you can edit the report — structure and all — WHILE the experiment runs. `load`
-returns empty collections for missing/torn files (live renders race with writers), so partial
-runs render their finished parts with no guards.
-
-The report is also a real stage (`<prefix>/report`, depending on every other stage): whenever
-the experiment's results change, it re-runs into a fresh, versioned run dir — rerunning an
-experiment never loses the old report; the version history sits in the dashboard's runs table
-like any stage's. Write via `load.report_dir(name)` so the script lands in the versioned dir
-when the driver runs it as that stage and in the live `_reports/<name>/` otherwise. A failing render prints an error and never
-delays a stage. Heavy rendering (slice PNGs etc.) belongs in a normal stage; the report just
-embeds the results. See `spearmint/examples/toy_report.py` + `toy_report_demo.py`.
+The report owns one normal run directory while its observed stages execute. The driver invokes
+the function in a fresh process at startup, after stage completions, every ~2 minutes, and at
+the end, always writing into that same directory. Editing the function during a run therefore
+takes effect on the next refresh. Once finalized, the report directory is immutable and remains
+in ordinary run history. If no observed stage creates a new attempt, no redundant report version
+is created. Upstream failures do not abandon the report. See `toy_report_demo.py`.
 
 ## Watch runs + browse results (CLI)
 

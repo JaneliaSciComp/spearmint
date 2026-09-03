@@ -228,13 +228,16 @@ def _content_kinds(r: "report.JobRow") -> "set[str]":
     return kinds | hit[1]
 
 
-def _reports() -> "set[str]":
-    """Experiment prefixes with a driver-rendered ROOT/_reports/<prefix>/report.html
-    (prefixes may contain '/'), for linking from the status table's group rows."""
-    rdir = Path(rundb.root()) / rundb.REPORTS_DIR
-    if not rdir.is_dir():
-        return set()
-    return {str(p.parent.relative_to(rdir)) for p in rdir.rglob("report.html")}
+def _reports(groups) -> "dict[str, str]":
+    """Experiment prefix -> current report.html, discovered in latest stage run dirs."""
+    found = {}
+    for rows in groups.values():
+        for row in rows:
+            path = Path(row.outdir) / "report.html"
+            if path.is_file():
+                prefix = row.job_key.rsplit("/", 1)[0]
+                found[prefix] = rundb._rel(str(path))
+    return found
 
 
 # Dashboard-sized label per report prefix, scraped from its own report.html (viz.page's
@@ -244,18 +247,18 @@ def _reports() -> "set[str]":
 _TITLE_CACHE: "dict[str, tuple[float, str]]" = {}
 
 
-def _report_title(prefix: str) -> str:
+def _report_title(path: str) -> str:
     now = time.monotonic()
-    hit = _TITLE_CACHE.get(prefix)
+    hit = _TITLE_CACHE.get(path)
     if hit is not None and hit[0] > now:
         return hit[1]
-    path = Path(rundb.root()) / rundb.REPORTS_DIR / prefix / "report.html"
+    report_path = Path(rundb.root()) / path
     title = ""
-    if path.exists():
-        m = re.search(r'data-short-title="([^"]*)"', path.read_text(errors="replace"))
+    if report_path.exists():
+        m = re.search(r'data-short-title="([^"]*)"', report_path.read_text(errors="replace"))
         if m:
             title = html.unescape(m.group(1))
-    _TITLE_CACHE[prefix] = (now + 60, title)
+    _TITLE_CACHE[path] = (now + 60, title)
     return title
 
 
@@ -263,8 +266,8 @@ def _table() -> str:
     groups = report.collect()
     kinds = {r.job_key: _content_kinds(r) for rows in groups.values() for r in rows}
     kinds = {k: v for k, v in kinds.items() if v}  # only stages that actually have something
-    reports = _reports()
-    titles = {prefix: _report_title(prefix) for prefix in reports}
+    reports = _reports(groups)
+    titles = {prefix: _report_title(path) for prefix, path in reports.items()}
     return report.render_html(groups, kinds=kinds, reports=reports, report_titles=titles,
                               runs=report.collect_runs())
 

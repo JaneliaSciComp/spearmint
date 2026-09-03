@@ -248,7 +248,7 @@ def lsf_log_relpath(job_key: str) -> str:
 def render_html(
     groups: "dict[str, list[JobRow]]",
     kinds: "dict[str, set[str]] | None" = None,
-    reports: "set[str] | None" = None,
+    reports: "dict[str, str] | None" = None,
     report_titles: "dict[str, str] | None" = None,
     runs: "dict[str, list[RunRow]] | None" = None,
 ) -> str:
@@ -263,25 +263,23 @@ def render_html(
     log (/file/<lsf log>) -- both dashboard.py routes. ``kinds`` maps job_key -> the set of
     content kinds its run page holds (png/table/json/log, resolved by
     dashboard._content_kinds); each gets a trailing glyph (explorer.CONTENT_SYMBOLS).
-    ``reports`` holds experiment prefixes with a driver-rendered report.html under
-    ROOT/_reports (may be multi-segment, e.g. "e00/smoke"): own + nested links land in the
-    reports column. ``report_titles`` maps those same prefixes -> the short label scraped off
-    report.html (viz.page's ``short_title``, see dashboard._report_title); the title column
-    prefers the group's own title, else the first nested one that has one."""
+    ``reports`` maps experiment prefixes to the current report stage's ROOT-relative
+    report.html. ``report_titles`` maps those prefixes to the short label scraped from the
+    file; the title column prefers the group's own title, else the first nested one."""
     import html
     from urllib.parse import quote
 
     from .explorer import CONTENT_SYMBOLS
 
     kinds = kinds or {}
-    reports = reports or set()
+    reports = reports or {}
     report_titles = report_titles or {}
     exp_rows = []
     rows = []
     run_rows = []
 
     def report_link(prefix: str, text: str) -> str:
-        return f'<a href="/file/{quote(f"_reports/{prefix}/report.html")}">{html.escape(text)}</a>'
+        return f'<a href="/file/{quote(reports[prefix])}">{html.escape(text)}</a>'
 
     newest = max(groups, key=lambda g: max(r.started_at for r in groups[g]), default=None)
     for group in sorted(groups):

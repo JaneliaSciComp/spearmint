@@ -12,7 +12,7 @@ freely mixable per experiment file. See examples/toy_aio_sidecar.py.
 """
 
 import asyncio
-import subprocess
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,15 +56,13 @@ class Config:
 class Stage:
     name: str
     job_key: str
-    # Builder resolved at submit time (after `requires` are confirmed done) -- same "lazy
-    # command" shape as orchestration.py's _eval_cmd reading a threshold file written by an
-    # earlier stage. Identity (job_key, mode, managed row) is NOT the builder's concern:
-    # run_experiment prepends it as an ``env SPEARMINT_*=...`` prefix, invisible to the
-    # worker's own argv parsing. By the time THIS builder runs, every stage in `requires`
-    # already has an up-to-date `.savedir` (run_experiment sets it right before calling this)
-    # -- reference ``upstream_stage.savedir`` directly instead of querying
-    # rundb.latest_outdir(upstream_stage.job_key) yourself.
-    command: Callable[[], "list[str]"]
+    # Exactly one action: a lazy argv builder, or an in-experiment Python function. Functions
+    # are self-dispatched through a fresh invocation of the experiment file, preserving the
+    # same process/managed-run boundary as command stages.
+    command: "Callable[[], list[str]] | None"
+    function: "Callable[[rundb.Run], object] | None" = None
+    _experiment_file: str = ""
+    _experiment_argv: "list[str]" = field(default_factory=list)
     requires: "list[Stage]" = field(default_factory=list)
     # Launcher prefix (e.g. lsf's bsub -K flags), kept SEPARATE from the command: aio formats
     # any "{}" in prefix elements with the run's minted outdir at launch (-oo {}/log.txt).
@@ -121,9 +119,9 @@ class Experiment:
     def __init__(self, prefix: str, cmd_prefix: "list[str] | None" = None, config: "Config | None" = None):
         if config is None:
             config = Config()
+        caller = sys._getframe(1).f_globals.get("__file__")
         repo = config.repo
         if repo is None:
-            caller = sys._getframe(1).f_globals.get("__file__")
             assert caller, (
                 "can't locate the experiment file (caller has no __file__, e.g. a REPL) -- "
                 "pass Config(repo=...) explicitly"
@@ -132,6 +130,8 @@ class Experiment:
         rundb.anchor(config.root or f"{repo}/output_rundb", repo=repo)
         self.config = config
         self.prefix = prefix
+        self.experiment_file = str(Path(caller or sys.argv[0]).resolve())
+        self.experiment_argv = list(sys.argv[1:])
         self.cmd_prefix = list(cmd_prefix or [])
         # A shell string pasted as one element (["uv run python"]) execs a program literally
         # named "uv run python" -- caught here at build time, not as GNU env's cryptic ENOENT.
@@ -141,29 +141,21 @@ class Experiment:
             f"list item, e.g. ['uv', 'run', 'python']"
         )
         self.stages: "list[Stage]" = []
-        # Optional report renderer, re-run by the scheduler after every stage finalize, every
-        # REPORT_TICK_SECONDS while anything is running, and once at DAG end. THE pattern is a
-        # STANDALONE SCRIPT path ("my_report.py"): the driver shells out to it (under this
-        # experiment's cmd_prefix, so the project env), and the same file runs by hand --
-        # during a run, after it, or a week later with new report code; every render is a
-        # fresh process, so editing it mid-run just works. Build it with spearmint.load +
-        # spearmint.viz and write report.html into load.report_dir(<name>). The script is
-        # ALSO a real stage ("<prefix>/report", depending on every other stage): when results
-        # change it re-runs into a fresh, VERSIONED run dir -- old reports are never lost --
-        # while tick/hand renders keep the live _reports/<name>/report.html current (what the
-        # status table links). A plain function ``fn(savedir) -> html`` also works for
-        # one-file demos (live view only, no versioning, fixed for the run's lifetime).
-        # Either way a failing render prints and the DAG carries on.
-        self.report: "Callable[[Callable], str] | str | None" = None
+        # A Stage assigned here is scheduled as a sidecar: one normal managed run starts when
+        # any observed stage runs, its fn is reinvoked into that SAME live outdir as results
+        # change, and the row finalizes after the observed stages settle.
+        self.report: "Stage | None" = None
 
     def Stage(
         self,
         name: str,
-        cmd: "Callable[[], list[str]]",
+        cmd: "Callable[[], list[str]] | None" = None,
+        fn: "Callable[[rundb.Run], object] | None" = None,
         req: "list[Stage] | None" = None,
         cmd_prefix: "Callable[[str], list[str]] | None" = None,
         outdir_args: "list[str] | None" = None,
     ) -> Stage:
+        assert (cmd is None) != (fn is None), "a stage needs exactly one of cmd= or fn="
         job_key = f"{self.prefix}/{name}"
         assert job_key not in _registered_job_keys, (
             f"job_key {job_key!r} is already registered (by stage {_registered_job_keys[job_key].name!r}). "
@@ -176,9 +168,13 @@ class Experiment:
         # stays SEPARATE from the stage's own command (resolved here -- job_key is known) so
         # aio can format its "{}" templates with the minted outdir (lsf's -oo {}/log.txt);
         # baking it into one merged lambda hid the prefix from that machinery.
+        prefix = list(self.cmd_prefix) if cmd_prefix is None else cmd_prefix(job_key)
+        if fn is not None and not prefix:
+            prefix = [sys.executable]
         s = Stage(
-            name=name, job_key=job_key, command=cmd, requires=req or [], outdir_args=outdir_args,
-            prefix=list(self.cmd_prefix) if cmd_prefix is None else cmd_prefix(job_key),
+            name=name, job_key=job_key, command=cmd, function=fn, requires=req or [], outdir_args=outdir_args,
+            prefix=prefix,
+            _experiment_file=self.experiment_file, _experiment_argv=self.experiment_argv,
         )
         _registered_job_keys[job_key] = s
         self.stages.append(s)
@@ -190,22 +186,11 @@ class Experiment:
         extend: "list[Stage] | None" = None,
         replace: "list[Stage] | None" = None,
     ) -> "dict[str, str]":
-        report_cmd = report_force = None
-        report_key = f"{self.prefix}/report"
-        if isinstance(self.report, str):
-            assert not any(s.name == "report" for s in self.stages), (
-                f"experiment {self.prefix!r} has a stage named 'report' AND e.report set -- "
-                f"the report stage claims that job_key; rename the stage"
-            )
-            report_cmd = [*self.cmd_prefix, self.report]
-            # aio's skip rule is done + no-dep-ran-THIS-session: a dep rerun by an earlier or
-            # concurrent driver leaves the report stale-but-skippable, so staleness forces a
-            # fresh version here.
-            report_force = "new" if rundb.stale_inputs(report_key) else None
+        if self.report is not None:
+            assert self.report in self.stages, "e.report must be a Stage belonging to this Experiment"
+            assert self.report.function is not None, "the report stage must use fn="
         return run_experiment(self.stages, new=new, extend=extend, replace=replace,
-                              on_update=self._render_report if self.report else None,
-                              report_cmd=report_cmd, report_key=report_key,
-                              report_force=report_force)
+                              report=self.report)
 
     def savedir(self, stage: "Stage | str") -> "str | None":
         """A stage's latest DONE outdir (by object or name), or None -- what a report fn keys
@@ -216,22 +201,6 @@ class Experiment:
         assert s is not None, f"no stage named {stage!r} in experiment {self.prefix!r}"
         return rundb.latest_outdir(s.job_key, status="done")
 
-    def _render_report(self) -> "Path | None":
-        assert self.report is not None, \
-            f"{self.prefix}: no report renderer registered (set e.report = ...)"
-        if isinstance(self.report, str):
-            # Fresh process per render: the script picks up its own edits, its stderr flows
-            # through the driver's log, and a hang can't wedge the scheduler (generous cap --
-            # a report is file reads + HTML). check=True routes failure into run_experiment's
-            # [report] guard.
-            subprocess.run([*self.cmd_prefix, self.report], check=True, timeout=600)
-            return None
-        out = Path(rundb.root()) / rundb.REPORTS_DIR / self.prefix
-        out.mkdir(parents=True, exist_ok=True)
-        path = out / "report.html"
-        path.write_text(self.report(self.savedir))
-        return path
-
     def main(self, argv: "list[str] | None" = None) -> "dict[str, str] | None":
         """The standard experiment-file entrypoint -- spearmint's own flags, parsed explicitly
         (never sniffed from a library call): ``--new/--extend/--replace STAGE`` (repeatable)
@@ -239,12 +208,8 @@ class Experiment:
         submits this same invocation as the long-lived LSF driver job instead of running
         in-process -- the driver re-runs sys.argv minus --submit, so the tier and force flags
         ride along (and the DAG was already built by the time we submit, so definition errors
-        fail here on your terminal, not minutes later in a driver log) -- and ``-r``/``--report``
-        re-renders report.html from the CURRENT ledger state and exits, reading only: no stage
-        is ever submitted, even a never-run one (bare invocation launches every stage whose
-        latest attempt isn't done -- ``--report`` is the safe alternative when you just want
-        to see the current report). Returns run()'s status dict, or None when it
-        only submitted or only rendered the report.
+        fail here on your terminal, not minutes later in a driver log). Returns run()'s status
+        dict, or None when it only submitted.
 
         ``argv`` defaults to sys.argv[1:]; an experiment file with its own args (a tier, a
         worker dispatch) parses them first and hands over the remainder:
@@ -255,6 +220,14 @@ class Experiment:
         Anything unrecognized here is a usage error -- worker-only flags belong before the
         parse_known_args split, not in ``argv``."""
         import argparse
+
+        dispatch = os.environ.get("SPEARMINT_EXEC_STAGE")
+        if dispatch:
+            stage = next((s for s in self.stages if s.job_key == dispatch), None)
+            assert stage is not None and stage.function is not None, f"no function stage {dispatch!r}"
+            with rundb.run() as run:
+                stage.function(run)
+            return None
 
         p = argparse.ArgumentParser(prog=f"{self.prefix} (spearmint stage flags)")
         # nargs="+" + extend: several names per flag (--new w1 w2), still repeatable. Each name
@@ -267,16 +240,7 @@ class Experiment:
                        help="force STAGE(s) (+ dependents), clearing the existing dir first; globs ok")
         p.add_argument("--submit", action="store_true",
                        help="submit this invocation as the LSF driver job (login node)")
-        p.add_argument("-r", "--report", action="store_true",
-                       help="render the report from the current ledger state and exit -- "
-                            "reads only, submits/runs nothing (takes priority over --submit; "
-                            "--new/--extend/--replace are ignored)")
         a = p.parse_args(sys.argv[1:] if argv is None else argv)
-        if a.report:
-            path = self._render_report()
-            if path:
-                print(f"report rendered: {path}")
-            return None
         if a.submit:
             from . import lsf  # local-only experiments never need the LSF module
 
@@ -370,10 +334,7 @@ def run_experiment(
     new: "list[Stage] | None" = None,
     extend: "list[Stage] | None" = None,
     replace: "list[Stage] | None" = None,
-    on_update: "Callable[[], object] | None" = None,
-    report_cmd: "list[str] | None" = None,
-    report_key: str = "",
-    report_force: "str | None" = None,
+    report: "Stage | None" = None,
 ) -> "dict[str, str]":
     """Lower the static plan onto the aio core and run it to completion. Every stage becomes
     one ``aio.Ctx.submit`` whose deps are its local requires -- ordering, skip-if-done, the
@@ -391,11 +352,11 @@ def run_experiment(
     failure after an older success reruns instead of hiding behind it. Returns
     {job_key: done|skipped|failed|abandoned}.
 
-    ``report_cmd``/``report_key``/``report_force`` (set by Experiment.run when e.report is a
-    script): the report is submitted as a REAL stage depending on every other job -- a rerun
-    dep cascades it to mode "new", so each version lands in its own run dir (old reports are
-    never lost), its ledger inputs make staleness exact, and it skips when nothing changed."""
-    local = set(stages)
+    A Stage assigned as ``report`` is excluded from ordinary dependency scheduling and runs
+    as a sidecar: it refreshes one live, versioned run directory while the other stages run,
+    then records their exact run IDs and finalizes after they settle."""
+    ordinary = [s for s in stages if s is not report]
+    local = set(ordinary)
     seeds_all = [s for group in (replace, extend, new) if group for s in group]
     assert len(seeds_all) == len(set(seeds_all)), (
         "a stage was passed to more than one of replace=/extend=/new="
@@ -404,7 +365,7 @@ def run_experiment(
     for mode_name, group in (("replace", replace), ("extend", extend), ("new", new)):
         for s in group or []:
             seed_mode[s] = mode_name
-    order = _topo_order(stages)  # deterministic submit order + the cycle assert
+    order = _topo_order(ordinary)  # deterministic submit order + the cycle assert
 
     # Externals never run in this pass, so their state is fixed: resolve every one's savedir
     # (confirming it's actually done) before anything launches.
@@ -421,25 +382,15 @@ def run_experiment(
         )
 
     assert rundb._ANCHOR is not None  # Experiment() anchored when the stages were declared
-    return asyncio.run(_run_plan(order, local, seed_mode, on_update,
-                                 report_cmd, report_key, report_force))
+    report_mode = seed_mode.get(report) if report is not None else None
+    return asyncio.run(_run_plan(order, local, seed_mode, report, report_mode))
 
 
-async def _run_plan(order, local, seed_mode, on_update,
-                    report_cmd=None, report_key="", report_force=None) -> "dict[str, str]":
+async def _run_plan(order, local, seed_mode, report=None, report_mode=None) -> "dict[str, str]":
     anchor = rundb._ANCHOR
     assert anchor is not None
     ctx = aio.Ctx(prefix="", cmd_prefix=[], repo=anchor.repo or anchor.root, root=anchor.root,
                   max_parallel=MAX_PARALLEL)
-
-    def update() -> None:
-        """Presentation must never endanger the run: a raising report prints and we carry on."""
-        if on_update is None:
-            return
-        try:
-            on_update()
-        except Exception as e:  # noqa: BLE001 -- see docstring
-            print(f"[report] render failed: {e!r}", flush=True)
 
     jobs: "dict[Stage, aio.Job]" = {}
 
@@ -453,44 +404,24 @@ async def _run_plan(order, local, seed_mode, on_update,
         return cb
 
     for s in order:
+        cmd = s.command
+        env = None
+        if s.function is not None:
+            cmd = lambda s=s: [s._experiment_file, *s._experiment_argv]
+            env = {"SPEARMINT_EXEC_STAGE": s.job_key}
         jobs[s] = ctx.submit(
-            s.name, cmd=s.command, deps=[jobs[d] for d in s.requires if d in local],
+            s.name, cmd=cmd, deps=[jobs[d] for d in s.requires if d in local],
             cmd_prefix=s.prefix, key=s.job_key, force=seed_mode.get(s),
-            outdir_args=s.outdir_args,
+            outdir_args=s.outdir_args, env=env,
         )
         jobs[s]._task.add_done_callback(_stash_savedir(s, jobs[s]))
-    ticker = None
-    if on_update is not None:
-        for j in jobs.values():  # re-render the report the moment anything finalizes
-            j._task.add_done_callback(lambda _fut: update())
-
-        async def _tick() -> None:
-            while True:  # module var read each lap, so demos can retune it pre-run
-                await asyncio.sleep(REPORT_TICK_SECONDS)
-                update()
-
-        ticker = asyncio.create_task(_tick())
-    update()  # initial render: the report exists (all-waiting) from the first second
-
-    # The report as a REAL stage, depending on every job: a rerun dep cascades it to "new"
-    # (fresh run dir per version -- old reports survive), inputs record the exact dep run_ids,
-    # skip-if-fresh applies. Submitted after the finalize-callback wiring above on purpose:
-    # its own completion needn't trigger another live render (the final update() below runs
-    # regardless). Its subprocess gets SPEARMINT_RUN_OUTDIR, steering load.report_dir into
-    # the versioned dir; tick renders (no identity) keep writing the live _reports file.
-    rjob = None
-    if report_cmd is not None:
-        rjob = ctx.submit("report", cmd=report_cmd, deps=list(jobs.values()),
-                          key=report_key, force=report_force)
-
-    tasks = [jobs[s]._task for s in order] + ([rjob._task] if rjob is not None else [])
+    rtask = asyncio.create_task(_run_report_sidecar(report, report_mode, jobs)) if report else None
+    tasks = [jobs[s]._task for s in order]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    if ticker is not None:
-        ticker.cancel()
-    update()  # final render: every stage finalized
+    report_result = await rtask if rtask is not None else None
 
     status: "dict[str, str]" = {}
-    keyed = [(s.job_key, jobs[s]) for s in order] + ([(report_key, rjob)] if rjob is not None else [])
+    keyed = [(s.job_key, jobs[s]) for s in order]
     for (job_key, job), res in zip(keyed, results):
         if isinstance(res, aio.JobFailed):
             st = "failed" if res.job_key == job_key else "abandoned"
@@ -501,4 +432,109 @@ async def _run_plan(order, local, seed_mode, on_update,
         else:
             st = "done" if job.ran else "skipped"
         status[job_key] = st
+    if report is not None:
+        status[report.job_key] = report_result
     return status
+
+
+async def _run_report_sidecar(report: Stage, mode: "str | None", jobs: "dict[Stage, aio.Job]") -> str:
+    """Run ``report`` as one versioned, continuously refreshed managed stage.
+
+    A version is minted only when an observed stage actually launches, its previous inputs
+    are stale, or the report itself was explicitly forced. Each refresh self-dispatches the
+    experiment file in a fresh process, but all refreshes share one row/outdir. Upstream
+    failures do not abandon presentation; only the final render decides report success.
+    """
+    tasks = [j._task for j in jobs.values()]
+    assert all(t is not None for t in tasks)
+    while not (mode or rundb.stale_inputs(report.job_key) or any(j.ran for j in jobs.values())):
+        if all(t.done() for t in tasks):
+            if rundb.is_done(report.job_key):
+                print(f"[skip] {report.name}: no observed stage changed", flush=True)
+                report._savedir = rundb.latest_outdir(report.job_key, status="done")
+                return "skipped"
+            break  # first report for an already-complete experiment
+        await asyncio.sleep(0.05)
+
+    await aio._wait_not_running(report.name, report.job_key)
+    # Another driver may have produced the missing/stale report while we waited. If this
+    # driver did not itself launch observed work, that version is exactly what we wanted.
+    if mode is None and not any(j.ran for j in jobs.values()) and rundb.is_done(report.job_key) \
+            and not rundb.stale_inputs(report.job_key):
+        print(f"[skip] {report.name}: refreshed by another driver", flush=True)
+        report._savedir = rundb.latest_outdir(report.job_key, status="done")
+        return "skipped"
+    argv = [*report.prefix, report._experiment_file, *report._experiment_argv]
+    row = rundb.start_managed(report.job_key, mode or "new", argv=argv, inputs=[])
+    report._savedir = row.outdir
+    changed = asyncio.Event()
+    for task in tasks:
+        task.add_done_callback(lambda _fut: changed.set())
+
+    async def render() -> bool:
+        input_jobs = [j for j in jobs.values() if j._row is not None]
+        env = os.environ.copy()
+        env.update({
+            "SPEARMINT_EXEC_STAGE": report.job_key,
+            "SPEARMINT_JOB_KEY": report.job_key,
+            "SPEARMINT_MODE": mode or "new",
+            "SPEARMINT_RUN_ROW": str(row.run_id),
+            "SPEARMINT_RUN_OUTDIR": row.outdir,
+            "SPEARMINT_INPUTS": os.pathsep.join(j._row.outdir for j in input_jobs),
+        })
+        prefix = [a.format(row.outdir) if "{}" in a else a for a in report.prefix]
+        cmd = [*prefix, report._experiment_file, *report._experiment_argv]
+        print(f"[report] {' '.join(cmd)}", flush=True)
+        log = Path(row.outdir) / "log.txt"
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=600)
+            text = stdout.decode(errors="replace") if stdout else ""
+            if text:
+                print(text, end="" if text.endswith("\n") else "\n", flush=True)
+                with log.open("a") as f:
+                    f.write(text)
+            if proc.returncode != 0:
+                print(f"[report] render failed: exited {proc.returncode}", flush=True)
+                return False
+            return True
+        except asyncio.CancelledError:
+            if proc is not None and proc.returncode is None:
+                proc.terminate()
+                await proc.wait()
+            raise
+        except TimeoutError:
+            if proc is not None and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            print("[report] render failed: timed out after 600s", flush=True)
+            with log.open("a") as f:
+                f.write("render failed: timed out after 600s\n")
+            return False
+        except Exception as e:  # presentation failure never interrupts observed stages
+            print(f"[report] render failed: {e!r}", flush=True)
+            with log.open("a") as f:
+                f.write(f"render failed: {e!r}\n")
+            return False
+
+    try:
+        await render()  # skeleton/current state as soon as the first changed stage launches
+        while not all(t.done() for t in tasks):
+            try:
+                await asyncio.wait_for(changed.wait(), timeout=REPORT_TICK_SECONDS)
+            except TimeoutError:
+                pass
+            changed.clear()
+            await render()
+        ok = await render()  # final state after every observed stage settled
+        input_ids = [j.run_id for j in jobs.values() if j.run_id is not None]
+        rundb.set_inputs(row.run_id, input_ids)
+        rundb.finish_managed(row.run_id, ok)
+        print(f"  [{report.name}] {'ok' if ok else 'FAILED'}", flush=True)
+        return "done" if ok else "failed"
+    except BaseException:
+        rundb.finish_managed(row.run_id, False)
+        raise
