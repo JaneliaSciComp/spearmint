@@ -169,6 +169,12 @@ class Job:
         inputs_env = (
             [f"SPEARMINT_INPUTS={os.pathsep.join(d._row.outdir for d in deps)}"] if deps else []
         )
+        # Launcher-prefix elements holding a "{}" are formatted with the minted outdir (the
+        # row exists by now) -- how lsf's "-oo {}/log.txt" lands each attempt's log in its own
+        # run dir. Only the prefix: worker argv may contain literal braces (hydra overrides).
+        npre = len(self._prefix)
+        base = [a.format(row.outdir) if i < npre and "{}" in a else a
+                for i, a in enumerate(self._base_cmd)]
         return [
             "env",
             f"SPEARMINT_JOB_KEY={self.job_key}",
@@ -176,7 +182,7 @@ class Job:
             f"SPEARMINT_RUN_ROW={row.run_id}",
             f"SPEARMINT_RUN_OUTDIR={row.outdir}",
             *inputs_env,
-            *self._base_cmd,
+            *base,
             *(a.format(row.outdir) for a in self._outdir_args or []),
         ]
 
@@ -208,6 +214,11 @@ class Job:
         async with self._ctx._sem:  # cap concurrent child processes (Ctx max_parallel)
             print(f"[run] {self.name}: {' '.join(cmd)}", flush=True)
             self.ran = True
+            # A LOCAL stage's pipe carries the worker's own stdout/stderr -- worker output, so
+            # tee it to the attempt's run dir like any other product. An LSF stage's pipe is
+            # only bsub -K chatter (the worker's stdout goes to -oo log.txt on the compute
+            # node), so no tee -- same filename either way.
+            logf = None if "bsub" in cmd else (Path(self._row.outdir) / "log.txt").open("w")
             try:
                 self._proc = await asyncio.create_subprocess_exec(
                     *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
@@ -216,6 +227,9 @@ class Job:
                 async for raw in self._proc.stdout:
                     line = raw.decode(errors="replace")
                     print(line, end="", flush=True)
+                    if logf is not None:
+                        logf.write(line)
+                        logf.flush()  # tail -f-able while the stage runs
                     if (m := _JOBID_RE.match(line)) is not None:
                         self._jobid = m.group(1)
                         rundb.set_lsf_jobid(self._row.run_id, self._jobid)
@@ -227,6 +241,9 @@ class Job:
                     _signal(self._proc, self._jobid)
                 self._close(ok=False)
                 raise
+            finally:
+                if logf is not None:
+                    logf.close()
         if self._stopping:  # deliberate stop: whatever the exit code, the data stands
             self._close(ok=True)
             print(f"  [{self.name}] stopped", flush=True)

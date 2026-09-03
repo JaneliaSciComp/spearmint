@@ -213,11 +213,12 @@ _KINDS_CACHE: "dict[str, tuple[float, set[str]]]" = {}
 
 def _content_kinds(r: "report.JobRow") -> "set[str]":
     """The content kinds this stage's /run page would show -- explorer.kinds_in over the row's
-    outdir (cached, see _KINDS_CACHE), plus 'log' for a failed stage whose LSF err log exists.
-    Takes the JobRow so the outdir comes from collect()'s single scan -- a per-stage
-    latest_outdir() here meant a fresh sqlite connection per stage over GPFS."""
+    outdir (cached, see _KINDS_CACHE), plus 'log' for a failed stage whose attempt log
+    (log.txt in its run dir) exists. Takes the JobRow so the outdir comes from collect()'s
+    single scan -- a per-stage latest_outdir() here meant a fresh sqlite connection per stage
+    over GPFS."""
     kinds: "set[str]" = set()
-    if r.status == "failed" and (Path(rundb.root()) / report.lsf_log_relpath(r.job_key)).exists():
+    if r.status == "failed" and (Path(r.outdir) / "log.txt").exists():
         kinds.add("log")
     now = time.monotonic()
     hit = _KINDS_CACHE.get(r.outdir)
@@ -453,16 +454,21 @@ def _run_page(job_key: str) -> str:
     compare = f"<p class='note'>{prev_link}{_diff_form(rel)}</p>"
     err = ""
     if status == "failed":
-        log_rel = report.lsf_log_relpath(job_key)
+        # The attempt's own log (log.txt in its run dir); legacy attempts predating
+        # log-in-run-dir fall back to the old shared _lsf_logs location.
+        log_rel = f"{rundb._rel(outdir)}/log.txt" if outdir else ""
         log_abs = Path(rundb.root()) / log_rel
+        if not log_abs.exists():
+            log_rel = report.lsf_log_relpath(job_key)
+            log_abs = Path(rundb.root()) / log_rel
         if log_abs.exists():
             tail = "".join(log_abs.read_text(errors="replace").splitlines(keepends=True)[-50:])
             err = (
                 f"<h3>err log <a href='/file/{quote(log_rel)}'>({html.escape(log_rel)})</a></h3>"
                 f"<pre class='err'>{html.escape(tail)}</pre>"
             )
-        else:  # locally-run stage: its output went to the driver's stdout, there is no file
-            err = "<p class='note'>no err log file (stage wasn't LSF-launched; see the driver's stdout)</p>"
+        else:  # a pre-log-in-run-dir local attempt: output only went to the driver's stdout
+            err = "<p class='note'>no err log file for this attempt (see the driver's stdout)</p>"
     body = meta + compare + err + explorer.render_dir(outdir, rundb.root())
     return _page(body, live=False, title=job_key)
 

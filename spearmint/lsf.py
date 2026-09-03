@@ -25,7 +25,8 @@ does this itself via its --submit flag (Experiment.main calls submit_driver on s
 
 submit_driver is also plain-callable, and is nothing bsub can't do by hand -- it just encodes
 the flags worth not retyping (-W 168:00 so the queue's default runtime limit doesn't kill the
-driver mid-experiment, the -oo log under _lsf_logs, a job name carrying the args).
+driver mid-experiment, the -oo log under _lsf_logs, a job name carrying the args). Stage logs
+do NOT live under _lsf_logs: each attempt's -oo goes to log.txt inside its own run dir.
 """
 
 import subprocess
@@ -50,16 +51,14 @@ KNOWN_BAD_HOSTS: "list[str]" = ["i03u22"]  # 2026-09-02: 7 cudaErrorDevicesUnava
 
 
 def _log_dir() -> str:
-    """Stage outdirs don't exist at submit time (the child mints its own via rundb.run), so
-    bsub -oo logs live here instead, keyed by job name and overwritten per attempt. Under the
+    """bsub -oo logs for DRIVER jobs (submit_driver) -- a driver has no run dir of its own.
+    Stage logs live in each attempt's run dir instead (log.txt, see _prefix). Under the
     anchored ledger root, so it resolves lazily -- never at import."""
     return f"{rundb.root()}/_lsf_logs"
 
 
 def _prefix(job_key: str, queue: str, walltime: str, slots: int, gpus: int,
            exclude_hosts: "list[str] | None" = None) -> "list[str]":
-    log_dir = _log_dir()
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
     name = job_key.replace("/", "_")
     # LSF -R sections (select[]/span[]/...) join with a space, not &&: && only combines
     # conditions WITHIN one section (e.g. select[mem>1000 && swp>1000]).
@@ -74,7 +73,10 @@ def _prefix(job_key: str, queue: str, walltime: str, slots: int, gpus: int,
         "-n", str(slots),
         "-R", resource_req,
         *(["-gpu", f"num={gpus}:mode=exclusive_process"] if gpus else []),
-        "-oo", f"{log_dir}/{name}.log",
+        # The worker's stdout/stderr IS worker output: it lands in the attempt's own run dir
+        # ("{}" is formatted with the minted outdir at launch, like outdir_args), versioned
+        # with the run -- a failed attempt keeps its log even after reruns.
+        "-oo", "{}/log.txt",
         "uv", "run", "python",
     ]
 

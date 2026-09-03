@@ -238,9 +238,10 @@ def _exp_row_html(group: str, rs: "list[JobRow]", title: str, rep_html: str, opn
 
 
 def lsf_log_relpath(job_key: str) -> str:
-    """ROOT-relative path of a stage's LSF -oo log -- lsf.py writes it to
-    _lsf_logs/{job_key with / -> _}.log. Where the driver captured the child's stdout/stderr, so
-    it's the err log to link on failure."""
+    """ROOT-relative path of a stage's LEGACY LSF -oo log (_lsf_logs/{job_key with / -> _}.log)
+    -- where stage logs lived before they became per-attempt log.txt files inside run dirs.
+    Kept as the run page's fallback for old attempts; _lsf_logs itself still holds DRIVER
+    logs (lsf.submit_driver), which have no run dir."""
     return f"_lsf_logs/{job_key.replace('/', '_')}.log"
 
 
@@ -309,11 +310,11 @@ def render_html(
             marks = "".join(CONTENT_SYMBOLS[k] for k in CONTENT_SYMBOLS if k in have)
             mark = f' <span class="mark" title="{html.escape(str(sorted(have)))}">{marks}</span>' if marks else ""
             badge = f'<span class="badge {_status_class(r)}">{html.escape(_status_label(r))}</span>'
-            # Click the red badge -> the err log. Only when the log actually EXISTS ("log" in
-            # kinds is exists()-gated): a locally-run stage has no LSF -oo file -- its output
-            # went to the driver's stdout -- and a dead link is worse than none.
+            # Click the red badge -> the failed attempt's log, a normal file in its run dir
+            # (LSF -oo and the driver's local tee both land there). Only when it actually
+            # EXISTS ("log" in kinds is exists()-gated): pre-log-in-run-dir attempts have none.
             if r.status == "failed" and "log" in have:
-                badge = f'<a href="/file/{quote(lsf_log_relpath(r.job_key))}">{badge}</a>'
+                badge = f'<a href="/file/{quote(f"{rundb._rel(r.outdir)}/log.txt")}">{badge}</a>'
             key_attr = f'data-key="{html.escape(r.job_key, quote=True)}"'
             rows.append(
                 f'<tr{brk} data-grp="{html.escape(group, quote=True)}" {key_attr}>'

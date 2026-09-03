@@ -66,6 +66,9 @@ class Stage:
     # rundb.latest_outdir(upstream_stage.job_key) yourself.
     command: Callable[[], "list[str]"]
     requires: "list[Stage]" = field(default_factory=list)
+    # Launcher prefix (e.g. lsf's bsub -K flags), kept SEPARATE from the command: aio formats
+    # any "{}" in prefix elements with the run's minted outdir at launch (-oo {}/log.txt).
+    prefix: "list[str]" = field(default_factory=list)
     # PLAIN-command stage (a worker that never calls rundb itself): when set, run_experiment
     # appends these templates formatted with the run's outdir (e.g. "+run_dir={}") -- the
     # worker's own output override -- so the child needn't know spearmint exists. The
@@ -169,14 +172,13 @@ class Experiment:
             f"objects landing on the same job_key by coincidence is almost always a bug, not "
             f"intentional sharing. See shared_preprocess.py for the intended pattern."
         )
-        # Identity is run_experiment's job (env prefix / outdir_args); this builder only
-        # composes launcher prefix + the stage's own command.
-        full_cmd = lambda: [
-            *(self.cmd_prefix if cmd_prefix is None else cmd_prefix(job_key)),
-            *cmd(),
-        ]
+        # Identity is run_experiment's job (env prefix / outdir_args). The launcher prefix
+        # stays SEPARATE from the stage's own command (resolved here -- job_key is known) so
+        # aio can format its "{}" templates with the minted outdir (lsf's -oo {}/log.txt);
+        # baking it into one merged lambda hid the prefix from that machinery.
         s = Stage(
-            name=name, job_key=job_key, command=full_cmd, requires=req or [], outdir_args=outdir_args
+            name=name, job_key=job_key, command=cmd, requires=req or [], outdir_args=outdir_args,
+            prefix=list(self.cmd_prefix) if cmd_prefix is None else cmd_prefix(job_key),
         )
         _registered_job_keys[job_key] = s
         self.stages.append(s)
@@ -453,7 +455,8 @@ async def _run_plan(order, local, seed_mode, on_update,
     for s in order:
         jobs[s] = ctx.submit(
             s.name, cmd=s.command, deps=[jobs[d] for d in s.requires if d in local],
-            key=s.job_key, force=seed_mode.get(s), outdir_args=s.outdir_args,
+            cmd_prefix=s.prefix, key=s.job_key, force=seed_mode.get(s),
+            outdir_args=s.outdir_args,
         )
         jobs[s]._task.add_done_callback(_stash_savedir(s, jobs[s]))
     ticker = None
