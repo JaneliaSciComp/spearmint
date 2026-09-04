@@ -298,7 +298,14 @@ def render_html(
             sub = "/".join(r.job_key.split("/")[:-1])
             brk = ' class="subbreak"' if prev_sub is not None and sub != prev_sub else ""
             prev_sub = sub
-            stale = "n/a" if r.stale is None else (f"yes: {', '.join(r.stale)}" if r.stale else "no")
+            if r.stale is None:
+                stale = "n/a"
+            elif not r.stale:
+                stale = "no"
+            else:
+                # One dependency per row keeps fan-in from making the whole status table wide.
+                deps = "".join(f"<span>{html.escape(dep)}</span>" for dep in r.stale)
+                stale = f'<span class="stale-deps">{deps}</span>'
             total = str(r.total).split(".")[0]
             avg = str(r.avg).split(".")[0]
             key_link = f'/run/{quote(r.job_key)}'  # job_key slashes are real path structure
@@ -320,7 +327,7 @@ def render_html(
                 f"<td>{total}</td>"
                 f"<td>{avg}</td>"
                 f"<td>{fmt_ts(r.started_at)}</td>"
-                f'<td class="stale">{html.escape(stale)}</td>'
+                f'<td class="stale">{stale}</td>'
                 "</tr>"
             )
             for rr in (runs or {}).get(r.job_key, []):

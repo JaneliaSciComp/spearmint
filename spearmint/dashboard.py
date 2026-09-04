@@ -46,6 +46,8 @@ _STYLE = """
   /* stage links muted -- the blue experiment rows carry the visual structure */
   td.key a { color: #8b949e; } td.key a:hover { color: #c9d1d9; }
   td.key { color: #8b949e; } td.stale { color: #8b949e; }
+  .stale-deps { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .stale-deps span { overflow-wrap: anywhere; }
   .mark { color: #8b949e; }  /* trailing content-kind glyphs (explorer.CONTENT_SYMBOLS) */
   .badge { padding: 1px 7px; border-radius: 10px; font-size: 11px; color: #0d1117; }
   .done { background: #3fb950; } .failed { background: #f85149; color: #fff; }

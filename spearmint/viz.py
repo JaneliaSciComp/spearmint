@@ -20,10 +20,9 @@ _PLOT_CDN = '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>'
 _PALETTE = ["#58a6ff", "#3fb950", "#f85149", "#d29922", "#a371f7", "#ffa657", "#79c0ff", "#7ee787",
             "#ff7b72", "#d2a8ff", "#56d364", "#e3b341", "#f778ba", "#76e3ea", "#ffbedd", "#aff5b4"]
 _ids = itertools.count()  # unique plot-div ids across one render
-# Default plot px per facet row -- deliberately SHORT (~2/5 the old 380; 76 was too cramped
-# once margins ate their share) so a many-panel report scans densely; any plot grows by
-# dragging its bottom edge, or via lines(height=...).
-ROW_HEIGHT = 152
+# Default plot pixels per facet row. Any plot can override this with ``height=`` or be resized
+# interactively by dragging its bottom edge.
+ROW_HEIGHT = 304
 
 
 def _num(v) -> "float | None":
