@@ -15,10 +15,13 @@ import asyncio
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from . import aio
 from . import rundb
+
+if TYPE_CHECKING:
+    from .dashspec import Dashboard
 
 # Max concurrently-running stage subprocesses. A ready stage beyond this stays pending until a
 # slot frees, so [run] lines are only ever printed for stages actually executing.
@@ -135,7 +138,7 @@ class Experiment:
             f"list item, e.g. ['uv', 'run', 'python']"
         )
         self.stages: "list[Stage]" = []
-        self.dashboard = None  # optional dashspec.Dashboard, serialized for the generic viewer
+        self.dashboard: "Dashboard | None" = None  # serialized for the generic viewer
         # A Stage assigned here is an ordinary retrospective stage. At run time every other
         # stage becomes an implicit dependency, so it produces one immutable final artifact.
         self.report: "Stage | None" = None
