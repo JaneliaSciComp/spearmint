@@ -202,6 +202,11 @@ invariant.
 
 ## Related: driver-driven auto-updating reports vs render-on-demand
 
+> Superseded (2026-09-04): live views are declarative `e.dashboard` specs. Retrospective
+> reports are independent analysis scripts over `load.history()` and are never experiment
+> stages or automatically linked by the browser. The discussion below records the earlier
+> design path rather than the current API.
+
 Today the DRIVER renders the report -- at start, after every finalize, every
 REPORT_TICK_SECONDS while stages run, once at the end -- into a static
 `_reports/<prefix>/report.html`. The alternative: build the report only when someone asks

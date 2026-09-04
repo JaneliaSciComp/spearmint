@@ -146,27 +146,31 @@ uv run python experiments/my_exp.py -d   # or --dashboard
 
 ### Retrospective reports (Python)
 
-A polished report is an ordinary function stage. `spearmint.load` turns settled run outputs
-into plain Python data; `spearmint.viz` turns that into HTML:
+A polished report is a separate analysis program, not an experiment stage. It may select any
+historical attempts—including runs made by older commits—then perform arbitrary queries and
+write HTML, PDF, or figures wherever the project keeps presentation artifacts.
 
 ```python
-def render(run):
-    rr = load.runs("my_exp/*")
-    html = viz.page(
-        viz.lines({k: load.rows(f"{d}/metrics.jsonl") for k, d in rr.items()},
-                  x="step", y=["loss", "val_*"], logy=True),
-        viz.table({k: load.json_file(f"{d}/summary.json") for k, d in rr.items()}),
-        title="my_exp",
-    )
-    Path(run.outdir, "report.html").write_text(html)
+from pathlib import Path
+from spearmint import load, rundb, viz
 
-e.report = e.Stage("report", fn=render)
+rundb.anchor("output_rundb")
+runs = load.history("my_exp/train_*", status="done")
+curves = {f"run{r.run_id}": load.rows(f"{r.outdir}/metrics.jsonl") for r in runs}
+out = Path("_reports/my_exp.html")
+out.parent.mkdir(exist_ok=True)
+out.write_text(
+    viz.page(viz.lines(curves, x="step", y=["loss", "val_*"]), title="my_exp")
+)
 ```
 
-Assigning the stage to `e.report` implicitly makes every other experiment stage a dependency.
-It runs once after they complete, in a fresh process, and produces a normal immutable,
-versioned run artifact. It reruns when its inputs change or when explicitly forced. Large
-reports may import their function from another module. See `toy_report_demo.py`.
+Run it explicitly when analysis is useful: `uv run python reports/my_exp.py`. Generated
+presentation files can live under `_reports/`; they are not inferred or linked by the live
+dashboard. `load.history()`
+returns every attempt with its run ID, output directory, status, commit, working-copy diff,
+command, and input run IDs. Use `load.runs()` when only each stage's latest output is wanted.
+Reports are intentionally not rebuilt on a timer and may use richer dependencies than the
+standard-library-only spearmint core.
 
 ## Watch runs + browse results (CLI)
 

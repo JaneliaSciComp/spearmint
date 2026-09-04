@@ -99,6 +99,10 @@ work unchanged; "done regardless of exit code" is purely driver-side.
 
 ## Files
 
+> Historical note: references below to `e.report` predate the split between declarative live
+> dashboards and independent retrospective analysis scripts. `Experiment.report` no longer
+> exists.
+
 - `spearmint/dagrunner.py` — ~90% of the diff (Sidecar, Experiment.Sidecar, helpers
   `_signal_stop`/`_escalate`, `SIDECAR_RESTARTS = 3`, run_experiment integration)
 - `spearmint/rundb.py` — `Run.watch` + `SPEARMINT_WATCH` read

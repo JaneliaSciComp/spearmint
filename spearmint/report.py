@@ -199,8 +199,8 @@ def _exp_names(group: str) -> "tuple[str, str]":
     return (m.group(1), m.group(2)) if m else (group, "")
 
 
-def _exp_row_html(group: str, rs: "list[JobRow]", title: str, rep_html: str, opn: str) -> str:
-    """One experiments-table row: shortname | name | report title | report links | the
+def _exp_row_html(group: str, rs: "list[JobRow]", title: str, view_html: str, opn: str) -> str:
+    """One experiments-table row: shortname | name | dashboard link | the
     aggregates over the group's stages (stage count, status-count badges, summed runs/total,
     mean attempt duration with a per-stage-avg histogram; min/max ride the tooltips)."""
     import html
@@ -224,7 +224,7 @@ def _exp_row_html(group: str, rs: "list[JobRow]", title: str, rep_html: str, opn
         # Full group name rides the tooltip -- the column shows just the short handle.
         f'<td class="short" title="{html.escape(group, quote=True)}">{html.escape(short)}</td>'
         f'<td class="full">{html.escape(title)}</td>'
-        f'<td class="rep">{rep_html}</td>'
+        f'<td class="rep">{view_html}</td>'
         f"<td>{len(rs)}</td>"
         f"<td>{badges}</td>"
         f"<td>{sum(r.n_runs for r in rs)}</td>"
@@ -248,15 +248,13 @@ def lsf_log_relpath(job_key: str) -> str:
 def render_html(
     groups: "dict[str, list[JobRow]]",
     kinds: "dict[str, set[str]] | None" = None,
-    reports: "dict[str, str] | None" = None,
-    report_titles: "dict[str, str] | None" = None,
     dashboards: "dict[str, str] | None" = None,
     dashboard_titles: "dict[str, str] | None" = None,
     runs: "dict[str, list[RunRow]] | None" = None,
 ) -> str:
     """The status view as an HTML fragment (no <html>/<head> shell -- dashboard.py wraps it,
     and swaps just this fragment in on each refresh): THREE tables. #exps has one row per
-    experiment group -- shortname | report title | report links | aggregates -- and #stages
+    experiment group -- shortname | dashboard title/link | aggregates -- and #stages
     holds every group's stage rows; the dashboard's select script shows only the clicked
     experiment's stages (most recently active one on first paint, via ``data-open``).
     Clicking a stage shows #runs: that job_key's every ledger attempt (``runs``, from
@@ -265,43 +263,29 @@ def render_html(
     log (/file/<lsf log>) -- both dashboard.py routes. ``kinds`` maps job_key -> the set of
     content kinds its run page holds (png/table/json/log, resolved by
     dashboard._content_kinds); each gets a trailing glyph (explorer.CONTENT_SYMBOLS).
-    ``reports`` maps experiment prefixes to retrospective report HTML, while ``dashboards``
-    maps prefixes to serialized live-view specs. Their title mappings provide the compact
-    experiment label, preferring a report title when both exist."""
+    ``dashboards`` maps prefixes to serialized live-view specs. ``dashboard_titles`` provides
+    the compact experiment label."""
     import html
     from urllib.parse import quote
 
     from .explorer import CONTENT_SYMBOLS
 
     kinds = kinds or {}
-    reports = reports or {}
-    report_titles = report_titles or {}
     dashboards = dashboards or {}
     dashboard_titles = dashboard_titles or {}
     exp_rows = []
     rows = []
     run_rows = []
 
-    def report_link(prefix: str, text: str) -> str:
-        return f'<a href="/file/{quote(reports[prefix])}">{html.escape(text)}</a>'
-
     newest = max(groups, key=lambda g: max(r.started_at for r in groups[g]), default=None)
     for group in sorted(groups):
-        own_report = group in reports
-        nested = sorted(r for r in reports if r.startswith(f"{group}/"))
         own_dashboard = group in dashboards
         nested_dashboards = sorted(r for r in dashboards if r.startswith(f"{group}/"))
-        title = report_titles.get(group) if own_report else None
-        if not title:
-            title = next((report_titles[r] for r in nested if report_titles.get(r)), None)
-        if not title:
-            title = dashboard_titles.get(group) if own_dashboard else None
+        title = dashboard_titles.get(group) if own_dashboard else None
         if not title:
             title = next((dashboard_titles[r] for r in nested_dashboards
                           if dashboard_titles.get(r)), None)
-        links = ([report_link(group, "📈")] if own_report else []) + \
-            [report_link(r, "📈" + r.split("/", 1)[1]) for r in nested]
-        links += ([f'<a href="/dashboard/{quote(group)}">📊</a>'] if own_dashboard else []) + \
+        links = ([f'<a href="/dashboard/{quote(group)}">📊</a>'] if own_dashboard else []) + \
             [f'<a href="/dashboard/{quote(r)}">📊{html.escape(r.split("/", 1)[1])}</a>'
              for r in nested_dashboards]
         opn = " data-open" if group == newest else ""
@@ -358,7 +342,7 @@ def render_html(
                     "</tr>"
                 )
     exp_header = (
-        "<tr><th>exp</th><th>title</th><th>reports</th><th>stages</th>"
+        "<tr><th>exp</th><th>title</th><th>dashboard</th><th>stages</th>"
         "<th>status</th><th>runs</th><th>total</th><th>avg</th><th>last</th><th>stale</th></tr>"
     )
     header = (

@@ -139,9 +139,6 @@ class Experiment:
         )
         self.stages: "list[Stage]" = []
         self.dashboard: "Dashboard | None" = None  # serialized for the generic viewer
-        # A Stage assigned here is an ordinary retrospective stage. At run time every other
-        # stage becomes an implicit dependency, so it produces one immutable final artifact.
-        self.report: "Stage | None" = None
 
     def Stage(
         self,
@@ -183,12 +180,6 @@ class Experiment:
         extend: "list[Stage] | None" = None,
         replace: "list[Stage] | None" = None,
     ) -> "dict[str, str]":
-        if self.report is not None:
-            assert self.report in self.stages, "e.report must be a Stage belonging to this Experiment"
-            assert self.report.function is not None, "the report stage must use fn="
-            self.report.requires = list(dict.fromkeys([
-                *self.report.requires, *(s for s in self.stages if s is not self.report)
-            ]))
         return run_experiment(self.stages, new=new, extend=extend, replace=replace)
 
     def _write_dashboard(self) -> "Path | None":
@@ -205,10 +196,9 @@ class Experiment:
         return out
 
     def savedir(self, stage: "Stage | str") -> "str | None":
-        """A stage's latest DONE outdir (by object or name), or None -- what a report fn keys
-        on, so a partially-complete run still renders its finished parts (contrast
-        Stage.savedir, which asserts when unresolved: right for commands, wrong for reports).
-        Reads the ledger, so it also sees runs from before this pass."""
+        """A stage's latest DONE outdir (by object or name), or None. Unlike
+        ``Stage.savedir``, this query is allowed to be unresolved. It reads the ledger, so it
+        also sees runs from before this pass."""
         s = stage if isinstance(stage, Stage) else next((t for t in self.stages if t.name == stage), None)
         assert s is not None, f"no stage named {stage!r} in experiment {self.prefix!r}"
         return rundb.latest_outdir(s.job_key, status="done")
@@ -370,10 +360,7 @@ def run_experiment(
     A stage whose LATEST attempt isn't done and that isn't forced launches as "new" -- a fresh
     dir every attempt, so a failed run's dir (and one day its log) survives as evidence, and a
     failure after an older success reruns instead of hiding behind it. Returns
-    {job_key: done|skipped|failed|abandoned}.
-
-    A retrospective report is just another function stage; Experiment.run adds every other
-    stage as its dependencies when it has been assigned to ``e.report``."""
+    {job_key: done|skipped|failed|abandoned}."""
     local = set(stages)
     seeds_all = [s for group in (replace, extend, new) if group for s in group]
     assert len(seeds_all) == len(set(seeds_all)), (

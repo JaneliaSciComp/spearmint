@@ -1,9 +1,8 @@
-"""Python-native report building: compose an HTML report from data YOUR code already loaded
-and shaped -- ``viz.page(viz.lines(...), viz.table(...), viz.images(...))`` -- from a function
-stage assigned with ``e.report = e.Stage("report", fn=render)``. The driver reinvokes it as
-stages finish and on a timer, into one live report run directory. Helpers take PYTHON DATA (lists of row
+"""Python-native report building: compose HTML from data YOUR analysis code already loaded
+and shaped -- ``viz.page(viz.lines(...), viz.table(...), viz.images(...))``. Helpers take PYTHON DATA (lists of row
 dicts, dicts of scalars), never file paths or spec dicts: loading, filtering, renaming, math
-happen in your experiment file with the whole language. Stdlib-only; plots are Plotly via CDN.
+happen in an independent report script with the whole language. Stdlib-only; plots are Plotly
+via CDN.
 
 Ported in spirit from mia-muvit's experiments/report.py (metric_table / image_panel / the
 loss-chart panels / the zoom-pan-arrow lightbox); the ssh/status half of that file is rundb +

@@ -131,7 +131,7 @@ _SORT_JS = """
     exps.querySelectorAll("tr.exp").forEach(function(r){
       r.classList.toggle("sel", r.dataset.grp === sel);
       r.onclick = function(e){
-        if (e.target.closest("a")) return;  // report links still navigate
+        if (e.target.closest("a")) return;  // dashboard and run links still navigate
         sel = r.dataset.grp;
         selKey = null;
         select();
@@ -229,18 +229,6 @@ def _content_kinds(r: "report.JobRow") -> "set[str]":
     return kinds | hit[1]
 
 
-def _reports(groups) -> "dict[str, str]":
-    """Experiment prefix -> current report.html, discovered in latest stage run dirs."""
-    found = {}
-    for rows in groups.values():
-        for row in rows:
-            path = Path(row.outdir) / "report.html"
-            if path.is_file():
-                prefix = row.job_key.rsplit("/", 1)[0]
-                found[prefix] = rundb._rel(str(path))
-    return found
-
-
 def _dashboards(groups) -> "dict[str, str]":
     """Experiment prefix -> serialized dashboard spec, without scanning the whole run tree."""
     prefixes = {
@@ -260,38 +248,14 @@ def _dashboard_title(path: str) -> str:
         return ""
 
 
-# Dashboard-sized label per report prefix, scraped from its own report.html (viz.page's
-# ``data-short-title`` body attribute) rather than duplicated state -- cached like
-# _KINDS_CACHE, same GPFS-cost rationale (every home load / refresh tick would otherwise
-# reread every report.html).
-_TITLE_CACHE: "dict[str, tuple[float, str]]" = {}
-
-
-def _report_title(path: str) -> str:
-    now = time.monotonic()
-    hit = _TITLE_CACHE.get(path)
-    if hit is not None and hit[0] > now:
-        return hit[1]
-    report_path = Path(rundb.root()) / path
-    title = ""
-    if report_path.exists():
-        m = re.search(r'data-short-title="([^"]*)"', report_path.read_text(errors="replace"))
-        if m:
-            title = html.unescape(m.group(1))
-    _TITLE_CACHE[path] = (now + 60, title)
-    return title
-
-
 def _table() -> str:
     groups = report.collect()
     kinds = {r.job_key: _content_kinds(r) for rows in groups.values() for r in rows}
     kinds = {k: v for k, v in kinds.items() if v}  # only stages that actually have something
-    reports = _reports(groups)
-    titles = {prefix: _report_title(path) for prefix, path in reports.items()}
     dashboards = _dashboards(groups)
     dashboard_titles = {p: _dashboard_title(path) for p, path in dashboards.items()}
-    return report.render_html(groups, kinds=kinds, reports=reports, report_titles=titles,
-                              dashboards=dashboards, dashboard_titles=dashboard_titles,
+    return report.render_html(groups, kinds=kinds, dashboards=dashboards,
+                              dashboard_titles=dashboard_titles,
                               runs=report.collect_runs())
 
 

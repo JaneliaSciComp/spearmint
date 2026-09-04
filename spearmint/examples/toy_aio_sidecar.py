@@ -7,10 +7,9 @@
    cancel(), and the cancelled watcher still resolves done (its validations stand), so
    summary can depend on it. Freshness WITHOUT wait-coupling: ``force=None if train.skipped
    else "new"`` -- deps= would serialize them, which is exactly wrong.
-2. A continuously re-rendered REPORT: an in-driver task looping render+sleep -- the same
-   sidecar shape minus the subprocess. The raw pattern owns its own isolation (the try/except
-   in the loop); the DAG layer's ``e.report`` is sugar bundling exactly that plus the output
-   convention and triggers.
+2. A continuously re-rendered ad-hoc HTML view: an in-driver task looping render+sleep. This
+   illustrates the lifecycle mechanics underneath a live sidecar; normal experiment
+   dashboards should use declarative ``e.dashboard`` configuration.
 
     uv run python spearmint/examples/toy_aio_sidecar.py
     uv run python spearmint/examples/toy_aio_sidecar.py --new train   # rerun; val+summary cascade
@@ -46,9 +45,7 @@ async def main(ctx: aio.Ctx) -> None:
             for f in Path(job.outdir).glob("*.jsonl"):
                 curves[f"{job.name}:{f.stem}"] = \
                     [json.loads(ln) for ln in f.read_text().splitlines()]
-        # This raw aio demo has no managed report Stage; keep its ad-hoc human-only view with
-        # the training attempt it describes. Experiment.report provides versioned sidecar
-        # lifecycle when that identity/history matters.
+        # Keep this ad-hoc human-only view with the training attempt it describes.
         out = Path(train.outdir)
         (out / "report.html").write_text(viz.page(
             viz.lines(curves, x="step", logy=True, title="train + val, live"),
@@ -60,7 +57,7 @@ async def main(ctx: aio.Ctx) -> None:
         while True:
             try:
                 render(live=True)
-            except Exception as e:  # raw pattern: isolation is YOUR job (e.report bundles it)
+            except Exception as e:  # raw pattern: isolation is this task's responsibility
                 print(f"[report] render failed: {e!r}", flush=True)
             await asyncio.sleep(2)
 
