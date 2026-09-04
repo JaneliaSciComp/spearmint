@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from . import explorer
+from . import load
 from . import report
 from . import rundb
 from . import viz
@@ -240,6 +241,25 @@ def _reports(groups) -> "dict[str, str]":
     return found
 
 
+def _dashboards(groups) -> "dict[str, str]":
+    """Experiment prefix -> serialized dashboard spec, without scanning the whole run tree."""
+    prefixes = {
+        row.job_key.rsplit("/", 1)[0]
+        for rows in groups.values() for row in rows if "/" in row.job_key
+    }
+    return {
+        prefix: f"{prefix}/.dashboard.json"
+        for prefix in prefixes if (Path(rundb.root()) / prefix / ".dashboard.json").is_file()
+    }
+
+
+def _dashboard_title(path: str) -> str:
+    try:
+        return json.loads((Path(rundb.root()) / path).read_text()).get("title", "")
+    except (OSError, ValueError):
+        return ""
+
+
 # Dashboard-sized label per report prefix, scraped from its own report.html (viz.page's
 # ``data-short-title`` body attribute) rather than duplicated state -- cached like
 # _KINDS_CACHE, same GPFS-cost rationale (every home load / refresh tick would otherwise
@@ -268,8 +288,84 @@ def _table() -> str:
     kinds = {k: v for k, v in kinds.items() if v}  # only stages that actually have something
     reports = _reports(groups)
     titles = {prefix: _report_title(path) for prefix, path in reports.items()}
+    dashboards = _dashboards(groups)
+    dashboard_titles = {p: _dashboard_title(path) for p, path in dashboards.items()}
     return report.render_html(groups, kinds=kinds, reports=reports, report_titles=titles,
+                              dashboards=dashboards, dashboard_titles=dashboard_titles,
                               runs=report.collect_runs())
+
+
+def _dashboard_images(panel: dict) -> str:
+    """Filename-aligned stage rows, optionally stacked as translucent overlays."""
+    roots = {
+        key: rundb.latest_outdir(key) for key in panel.get("stages", [])
+    }
+    files = {
+        key: {str(p.relative_to(root)): p for p in Path(root).glob(panel.get("glob", "*.png"))}
+        for key, root in roots.items() if root and Path(root).is_dir()
+    }
+    names = sorted({name for by_name in files.values() for name in by_name})
+    title = f"<h2>{html.escape(panel.get('title', ''))}</h2>" if panel.get("title") else ""
+    width = int(panel.get("width", 220))
+
+    def image(path: Path, opacity: float = 1.0) -> str:
+        rel = rundb._rel(str(path))
+        return (f'<img class="zoom" src="/file/{quote(rel)}" width="{width}" '
+                f'style="opacity:{opacity}" loading="lazy">')
+
+    if panel.get("overlay"):
+        cells = []
+        for name in names:
+            paths = [(key, files[key][name]) for key in files if name in files[key]]
+            layers = "".join(
+                f'<span title="{html.escape(key)}">{image(path, 1.0 if i == 0 else 0.5)}</span>'
+                for i, (key, path) in enumerate(paths)
+            )
+            cells.append(f'<td><div class="dashoverlay">{layers}</div></td>')
+        head = "".join(f"<th>{html.escape(n)}</th>" for n in names)
+        return title + f'<table class="imggrid"><tr>{head}</tr><tr>{"".join(cells)}</tr></table>'
+
+    head = "".join(f"<th>{html.escape(n)}</th>" for n in names)
+    rows = []
+    for key in panel.get("stages", []):
+        cells = "".join(
+            f"<td>{image(files[key][name]) if key in files and name in files[key] else '–'}</td>"
+            for name in names
+        )
+        rows.append(f"<tr><td>{html.escape(key.rsplit('/', 1)[-1])}</td>{cells}</tr>")
+    return title + f'<table class="imggrid"><tr><th></th>{head}</tr>{"".join(rows)}</table>'
+
+
+def _dashboard_page(prefix: str) -> str:
+    path = explorer._safe(rundb.root(), f"{prefix}/.dashboard.json")
+    try:
+        spec = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        return viz.page(viz.note(f"dashboard unavailable: {e}"), title=prefix)
+    sections = []
+    for panel in spec.get("panels", []):
+        if panel.get("kind") == "lines":
+            series = {}
+            for key in panel.get("stages", []):
+                out = rundb.latest_outdir(key)
+                if out:
+                    try:
+                        artifact = explorer._safe(out, panel.get("file", "metrics.jsonl"))
+                    except AssertionError:
+                        continue
+                    series[key.rsplit("/", 1)[-1]] = load.rows(artifact)
+            sections.append(viz.lines(
+                series, x=panel.get("x"), y=panel.get("y"), color=panel.get("color"),
+                facet=panel.get("facet"), dash=panel.get("dash"), colors=panel.get("colors"),
+                logy=panel.get("logy", False), title=panel.get("title", ""),
+                height=panel.get("height"),
+            ))
+        elif panel.get("kind") == "images":
+            sections.append(_dashboard_images(panel))
+        else:
+            sections.append(viz.note(f"unknown dashboard panel: {panel.get('kind')!r}"))
+    return viz.page(*sections, title=spec.get("title") or prefix,
+                    refresh=max(1, int(spec.get("refresh", REFRESH_SECONDS))))
 
 
 # --- run diff ------------------------------------------------------------------------------
@@ -486,6 +582,11 @@ class _LedgerHandler(explorer.Handler):
             self._serve_file(unquote(self.path[len("/file/"):]), rundb.root())
         elif self.path.startswith("/run/"):
             self._send(_run_page(unquote(self.path[len("/run/"):])))
+        elif self.path.startswith("/dashboard/"):
+            try:
+                self._send(_dashboard_page(unquote(self.path[len("/dashboard/"):])))
+            except AssertionError:
+                self.send_error(403)
         elif self.path.startswith("/dir/"):
             # A SPECIFIC run's directory (the runs table links here) -- /run/<job_key> only
             # ever shows the latest attempt's dir.

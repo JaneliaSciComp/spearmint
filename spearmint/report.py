@@ -250,6 +250,8 @@ def render_html(
     kinds: "dict[str, set[str]] | None" = None,
     reports: "dict[str, str] | None" = None,
     report_titles: "dict[str, str] | None" = None,
+    dashboards: "dict[str, str] | None" = None,
+    dashboard_titles: "dict[str, str] | None" = None,
     runs: "dict[str, list[RunRow]] | None" = None,
 ) -> str:
     """The status view as an HTML fragment (no <html>/<head> shell -- dashboard.py wraps it,
@@ -263,9 +265,9 @@ def render_html(
     log (/file/<lsf log>) -- both dashboard.py routes. ``kinds`` maps job_key -> the set of
     content kinds its run page holds (png/table/json/log, resolved by
     dashboard._content_kinds); each gets a trailing glyph (explorer.CONTENT_SYMBOLS).
-    ``reports`` maps experiment prefixes to the current report stage's ROOT-relative
-    report.html. ``report_titles`` maps those prefixes to the short label scraped from the
-    file; the title column prefers the group's own title, else the first nested one."""
+    ``reports`` maps experiment prefixes to retrospective report HTML, while ``dashboards``
+    maps prefixes to serialized live-view specs. Their title mappings provide the compact
+    experiment label, preferring a report title when both exist."""
     import html
     from urllib.parse import quote
 
@@ -274,6 +276,8 @@ def render_html(
     kinds = kinds or {}
     reports = reports or {}
     report_titles = report_titles or {}
+    dashboards = dashboards or {}
+    dashboard_titles = dashboard_titles or {}
     exp_rows = []
     rows = []
     run_rows = []
@@ -285,11 +289,21 @@ def render_html(
     for group in sorted(groups):
         own_report = group in reports
         nested = sorted(r for r in reports if r.startswith(f"{group}/"))
+        own_dashboard = group in dashboards
+        nested_dashboards = sorted(r for r in dashboards if r.startswith(f"{group}/"))
         title = report_titles.get(group) if own_report else None
         if not title:
             title = next((report_titles[r] for r in nested if report_titles.get(r)), None)
+        if not title:
+            title = dashboard_titles.get(group) if own_dashboard else None
+        if not title:
+            title = next((dashboard_titles[r] for r in nested_dashboards
+                          if dashboard_titles.get(r)), None)
         links = ([report_link(group, "📈")] if own_report else []) + \
             [report_link(r, "📈" + r.split("/", 1)[1]) for r in nested]
+        links += ([f'<a href="/dashboard/{quote(group)}">📊</a>'] if own_dashboard else []) + \
+            [f'<a href="/dashboard/{quote(r)}">📊{html.escape(r.split("/", 1)[1])}</a>'
+             for r in nested_dashboards]
         opn = " data-open" if group == newest else ""
         exp_rows.append(_exp_row_html(group, groups[group], title or "", " ".join(links), opn))
         prev_sub = None

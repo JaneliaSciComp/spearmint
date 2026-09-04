@@ -41,19 +41,19 @@ def main() -> None:
         upstreams = args.upstream if args.upstream is not None else r.inputs
         text = "".join(f"upstream={u}\n" for u in upstreams) or "no upstream\n"
         (Path(r.outdir) / "result.txt").write_text(text)
-        # Fake training curves, deterministic per job_key, STREAMED a row per 0.5s (one full
-        # flushed line each) like a real training loop -- so live viewers (the report's tick
-        # re-renders, a reloaded run page) watch the curves grow. ~10s per stage.
+        # Fake training curves, deterministic per job_key, appended at 4 Hz (one complete,
+        # flushed JSONL row every 0.25s). Eighty points keep the worker alive for ~20s so the
+        # live dashboard's refresh behavior is easy to inspect.
         rng = random.Random(r.job_key)
         base = rng.uniform(1.0, 2.0)
         rows = []
         with open(Path(r.outdir) / "metrics.jsonl", "w") as f:
-            for i in range(20):
+            for i in range(80):
                 rows.append({"step": i, "loss": base * 0.90**i + rng.uniform(0, 0.02),
                              "val_loss": base * 0.92**i + rng.uniform(0, 0.05)})
                 f.write(json.dumps(rows[-1]) + "\n")
                 f.flush()
-                time.sleep(1)
+                time.sleep(0.25)
         (Path(r.outdir) / "summary.json").write_text(json.dumps(
             {"final_loss": rows[-1]["loss"],
              "best_val_loss": min(row["val_loss"] for row in rows), "n_steps": len(rows)}

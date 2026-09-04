@@ -432,19 +432,6 @@ def finish_managed(run_id: int, ok: bool) -> None:
     _finish(run_id, "done" if ok else "failed")
 
 
-def set_inputs(run_id: int, inputs: "list[int]") -> None:
-    """Set a managed run's final input provenance.
-
-    Ordinary stages know their inputs when they start. A sidecar report starts before the
-    stages it observes have all minted rows, so its exact inputs are filled in at finalize.
-    """
-    with _DB_LOCK:
-        conn = _connect()
-        with conn:
-            conn.execute("UPDATE runs SET inputs = ? WHERE run_id = ?", (json.dumps(inputs), run_id))
-        conn.close()
-
-
 def set_lsf_jobid(run_id: int, jobid: str) -> None:
     """Upgrade a managed row's liveness handle from the driver's identity to the stage's own
     LSF job id (parsed from bsub's 'Job <id> is submitted' ack) -- after this, reconcile_wip

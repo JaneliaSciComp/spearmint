@@ -116,10 +116,30 @@ A second driver over the same experiment is fine: stages whose job_key is live u
 first driver just wait (`[wait]` printed) for that run to close, then skip or launch as
 usual — so you can force-rerun a failed stage while a long train keeps running.
 
-### Experiment reports (Python, live)
+### Live dashboards (declarative)
 
-A report is a function stage defined beside the experiment. `spearmint.load` turns the ledger
-and run dirs into plain Python data; `spearmint.viz` turns that into HTML:
+Live monitoring is configuration, not a rendering process. The driver serializes the spec;
+`spearmint browse` reads current stage directories and renders growing JSONL files and PNGs:
+
+```python
+e.dashboard = sp.Dashboard(
+    sp.Lines([train_a, train_b], file="metrics.jsonl", x="step",
+             y=["loss", "val_*"], dash={"val_*": "dash"}, logy=True),
+    sp.Images([predict_a, predict_b], glob="slices/*.png",
+              align="filename", overlay=True),
+    title="my experiment", refresh=10,
+)
+```
+
+Dashboard panels only select and arrange artifacts; derived data should be produced by a stage.
+The generic viewer never imports or executes experiment code. See
+`spearmint/examples/toy_dashboard_demo.py` for multiple plots, faceting, explicit styles,
+filename-aligned images, and overlays updating during a 20-second run.
+
+### Retrospective reports (Python)
+
+A polished report is an ordinary function stage. `spearmint.load` turns settled run outputs
+into plain Python data; `spearmint.viz` turns that into HTML:
 
 ```python
 def render(run):
@@ -135,12 +155,10 @@ def render(run):
 e.report = e.Stage("report", fn=render)
 ```
 
-The report owns one normal run directory while its observed stages execute. The driver invokes
-the function in a fresh process at startup, after stage completions, every ~2 minutes, and at
-the end, always writing into that same directory. Editing the function during a run therefore
-takes effect on the next refresh. Once finalized, the report directory is immutable and remains
-in ordinary run history. If no observed stage creates a new attempt, no redundant report version
-is created. Upstream failures do not abandon the report. See `toy_report_demo.py`.
+Assigning the stage to `e.report` implicitly makes every other experiment stage a dependency.
+It runs once after they complete, in a fresh process, and produces a normal immutable,
+versioned run artifact. It reruns when its inputs change or when explicitly forced. Large
+reports may import their function from another module. See `toy_report_demo.py`.
 
 ## Watch runs + browse results (CLI)
 

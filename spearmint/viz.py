@@ -62,6 +62,7 @@ def lines(
     color: "str | None" = None,
     facet: "str | None" = None,
     dash: "dict[str, str] | None" = None,
+    colors: "dict[str, str] | None" = None,
     logy: bool = False,
     title: str = "",
     height: "int | None" = None,
@@ -101,6 +102,9 @@ def lines(
                     # label -- its train/val traces share it, distinguished by dash. Single-
                     # series plots keep the old per-trace coloring (one color per y column).
                     ci = li if len(series) > 1 else len(traces)
+                    chosen = next((v for p, v in (colors or {}).items()
+                                   if fnmatch(str(label), p) or fnmatch(str(gval), p)
+                                   or fnmatch(yc, p)), _PALETTE[ci % len(_PALETTE)])
                     traces.append({
                         "x": [xv for xv, _ in pts],
                         "y": [yv for _, yv in pts],
@@ -109,7 +113,7 @@ def lines(
                         # past ~1k per trace the markers fuse into a fat line and just hide it.
                         "mode": "lines+markers" if len(pts) < 1000 else "lines",
                         "marker": {"size": 4},
-                        "line": {"dash": d, "color": _PALETTE[ci % len(_PALETTE)]},
+                        "line": {"dash": d, "color": chosen},
                         **({"xaxis": f"x{fi + 1}", "yaxis": f"y{fi + 1}"} if fi else {}),
                     })
     n = len(facet_vals) or 1
@@ -120,10 +124,13 @@ def lines(
         # into the top margin) -- Plotly's default bottom placement for horizontal legends
         # overlaps the x-axis title. Margins are tight to match the short default height;
         # the top fits one legend row.
-        "margin": {"t": 24, "b": 34, "l": 56, "r": 10},
+        "margin": {"t": 64 if n > 1 else 42, "b": 34, "l": 56, "r": 10},
         "paper_bgcolor": "#0d1117", "plot_bgcolor": "#161b22",
         "font": {"color": "#c9d1d9"}, "showlegend": True,
-        "legend": {"orientation": "h", "x": 0, "xanchor": "left", "y": 1.0, "yanchor": "bottom"},
+        # Lift the legend clear of the plot; faceted charts reserve the band immediately
+        # below it for centered facet labels.
+        "legend": {"orientation": "h", "x": 0, "xanchor": "left",
+                   "y": 1.18 if n > 1 else 1.08, "yanchor": "bottom"},
         "height": height or ROW_HEIGHT * nrows,
         # Constant across re-renders, so Plotly.react (page()'s live poller) keeps the USER's
         # zoom/pan/legend state while the data underneath updates.
@@ -131,13 +138,24 @@ def lines(
     }
     if n > 1:
         layout["grid"] = {"rows": nrows, "columns": ncols, "pattern": "independent"}
+        layout["annotations"] = [
+            {
+                "text": f"{facet}={value}",
+                "x": (i % ncols + 0.5) / ncols,
+                "y": 1 - (i // ncols) / nrows + 0.025,
+                "xref": "paper", "yref": "paper",
+                "xanchor": "center", "yanchor": "bottom", "showarrow": False,
+                "font": {"color": "#c9d1d9", "size": 12},
+            }
+            for i, value in enumerate(facet_vals)
+        ]
     # y-axis label from the y patterns the caller asked for (a plot with several y columns
     # names them in the legend; the axis still says what family it shows).
     ytitle = ", ".join(y_pats) if y_pats else ""
     for i in range(n):
         s = "" if i == 0 else str(i + 1)
         layout[f"yaxis{s}"] = {"title": ytitle, **({"type": "log"} if logy else {})}
-        layout[f"xaxis{s}"] = {"title": f"{facet}={facet_vals[i]}" if facet_vals else (x or "index")}
+        layout[f"xaxis{s}"] = {"title": x or "index"}
     pid = f"viz{next(_ids)}"
     head = f"<h2>{_html.escape(title)}</h2>" if title else ""
     # Data rides in a JSON island next to an empty div; page()'s shared runtime draws every
@@ -282,6 +300,8 @@ _STYLE = """
   table.metrics th.asc::after { content: " \\25B4"; } table.metrics th.desc::after { content: " \\25BE"; }
   table.metrics td { border-bottom: 1px solid #21262d; }
   img.zoom { cursor: zoom-in; border: 1px solid #30363d; }
+  .dashoverlay { display: grid; }
+  .dashoverlay > span { grid-area: 1 / 1; }
   pre { background: #161b22; border: 1px solid #30363d; padding: 10px; overflow-x: auto;
         border-radius: 6px; }
   .da { color: #3fb950; } .dr { color: #f85149; }   /* diff added / removed */
@@ -302,33 +322,58 @@ _STYLE = """
 # transform -- the GPU bilinear-filters transforms at high zoom, wrecking pixel inspection.
 _LIGHTBOX_JS = """
 (function() {
-  var V = document.getElementById("viewer"), IMG = document.getElementById("viewer_img");
+  var V = document.getElementById("viewer"), HINT = V.querySelector(".hint");
   var scale = 1, tx = 0, ty = 0, drag = false, lx = 0, ly = 0;
-  var grid = [], row = 0, col = 0, curW = 0, curH = 0;
+  var grid = [], row = 0, col = 0, layer = 0, layers = [], curW = 0, curH = 0;
   function apply() {
-    IMG.style.left = tx + "px"; IMG.style.top = ty + "px";
-    IMG.style.width = (IMG.naturalWidth * scale) + "px";
-    IMG.style.height = (IMG.naturalHeight * scale) + "px";
+    layers.forEach(function(img) {
+      img.style.left = tx + "px"; img.style.top = ty + "px";
+      img.style.width = (img.naturalWidth * scale) + "px";
+      img.style.height = (img.naturalHeight * scale) + "px";
+    });
   }
   function fit() {
-    var vw = V.clientWidth, vh = V.clientHeight, nw = IMG.naturalWidth || 1, nh = IMG.naturalHeight || 1;
+    var img = layers[layer], vw = V.clientWidth, vh = V.clientHeight;
+    var nw = img.naturalWidth || 1, nh = img.naturalHeight || 1;
     scale = Math.min(vw / nw, vh / nh) * 0.95; tx = (vw - nw * scale) / 2; ty = (vh - nh * scale) / 2; apply();
   }
   function shown() {  // same-size tile -> keep zoom/pan (arrow scrubbing stays put); else re-fit
-    if (IMG.naturalWidth === curW && IMG.naturalHeight === curH) apply(); else fit();
-    curW = IMG.naturalWidth; curH = IMG.naturalHeight;
+    var img = layers[layer];
+    if (img.naturalWidth === curW && img.naturalHeight === curH) apply(); else fit();
+    curW = img.naturalWidth; curH = img.naturalHeight;
   }
-  function show() { IMG.src = grid[row][col].src; if (IMG.complete) shown(); else IMG.onload = shown; }
+  function order() {
+    layers.forEach(function(img, i) {
+      var distance = (i - layer + layers.length) % layers.length;
+      img.style.zIndex = distance === 0 ? layers.length : distance;
+      img.style.opacity = layers.length === 1 ? "1" : (distance === 0 ? "1" : "0.45");
+    });
+    HINT.textContent = "arrows: row/col · j/k: overlay " + (layer + 1) + "/" + layers.length
+      + " · scroll: zoom · drag: pan · Esc: close";
+  }
+  function show() {
+    layers.forEach(function(img) { img.remove(); });
+    layers = grid[row][col].map(function(src, i) {
+      var img = document.createElement("img");
+      img.className = "viewer_layer"; img.src = src.src; img.alt = src.alt || src.title || "";
+      img.onload = apply;
+      V.appendChild(img); return img;
+    });
+    layer = Math.min(layer, layers.length - 1); order();
+    var active = layers[layer];
+    if (active.complete) shown(); else active.onload = shown;
+  }
   function open(el) {
     var trs = Array.prototype.slice.call(el.closest("table").querySelectorAll("tr"));
     grid = trs.filter(function(tr) { return tr.querySelector("td"); }).map(function(tr) {
       var tds = Array.prototype.slice.call(tr.children).filter(function(n) { return n.tagName === "TD"; });
-      return tds.map(function(td) { return td.querySelector("img.zoom"); });
+      return tds.map(function(td) { return Array.prototype.slice.call(td.querySelectorAll("img.zoom")); });
     });
     row = 0; col = 0;
     for (var i = 0; i < grid.length; i++) {
-      var j = grid[i].indexOf(el);
-      if (j >= 0) { row = i; col = j; break; }
+      for (var j = 0; j < grid[i].length; j++) {
+        if (grid[i][j].indexOf(el) >= 0) { row = i; col = j; layer = grid[i][j].indexOf(el); break; }
+      }
     }
     curW = 0; curH = 0;
     V.classList.add("open"); show();
@@ -338,8 +383,12 @@ _LIGHTBOX_JS = """
     while (true) {
       nr += dr; nc += dc;
       if (nr < 0 || nr >= grid.length || nc < 0 || nc >= grid[nr].length) return;
-      if (grid[nr][nc]) { row = nr; col = nc; show(); return; }
+      if (grid[nr][nc] && grid[nr][nc].length) { row = nr; col = nc; layer = 0; show(); return; }
     }
+  }
+  function rotate(d) {
+    if (layers.length < 2) return;
+    layer = (layer + d + layers.length) % layers.length; order(); shown();
   }
   function close() { V.classList.remove("open"); }
   document.addEventListener("click", function(e) {
@@ -349,6 +398,8 @@ _LIGHTBOX_JS = """
   document.addEventListener("keydown", function(e) {
     if (!V.classList.contains("open")) return;
     if (e.key === "Escape") { close(); return; }
+    if (e.key === "j" || e.key === "J") { e.preventDefault(); rotate(1); return; }
+    if (e.key === "k" || e.key === "K") { e.preventDefault(); rotate(-1); return; }
     var d = {ArrowRight: [0, 1], ArrowLeft: [0, -1], ArrowDown: [1, 0], ArrowUp: [-1, 0]}[e.key];
     if (d) { e.preventDefault(); move(d[0], d[1]); }
   });
@@ -359,7 +410,7 @@ _LIGHTBOX_JS = """
     tx = px - (px - tx) * f; ty = py - (py - ty) * f; scale *= f; apply();
   }, {passive: false});
   V.addEventListener("mousedown", function(e) {
-    if (e.target !== IMG) return;
+    if (!e.target.classList.contains("viewer_layer")) return;
     drag = true; lx = e.clientX; ly = e.clientY; V.style.cursor = "grabbing"; e.preventDefault();
   });
   window.addEventListener("mousemove", function(e) {
@@ -518,6 +569,6 @@ def page(*sections: str, title: str = "report", short_title: "str | None" = None
     return (f'<!doctype html><html><head><meta charset="utf-8">'
             f"<title>{_html.escape(title)}</title>{_PLOT_CDN}<style>{_STYLE}</style></head>"
             f'<body{live} data-short-title="{short}">{home}<h1>{_html.escape(title)}</h1>{desc}{body}'
-            f'<div id="viewer"><div class="hint">scroll = zoom · drag = pan · arrows = walk the '
-            f'grid · Esc / click background = close</div><img id="viewer_img"/></div>'
+            f'<div id="viewer"><div class="hint">arrows: row/col · j/k: overlay · scroll: zoom · '
+            f'drag: pan · Esc: close</div></div>'
             f"<script>{_LIGHTBOX_JS}</script><script>{runtime}</script></body></html>")
