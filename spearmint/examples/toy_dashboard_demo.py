@@ -33,13 +33,19 @@ e.dashboard = sp.Dashboard(
         colors={"model_a": "#58a6ff", "model_b": "#f0883e"},
         title="Loss faceted by view", height=320,
     ),
-    sp.Images(
-        [model_a, model_b], glob="frames/*.png", align="filename",
-        title="Frames aligned by filename", width=150,
+    sp.Table(
+        [model_a, model_b], path="summary.json", rows="metric", columns="stage",
+        metrics=["final_*", "best_*"], title="Final metrics",
     ),
     sp.Images(
-        [model_a, model_b], glob="frames/*.png", align="filename", overlay=True,
-        title="Model overlays", width=150,
+        [model_a, model_b], path="frames/{row}_sharedbase_{col}_{overlay}.png",
+        stage_mode="rows", overlays=["raw", "prediction"],
+        title="Stages and views as rows", width=150,
+    ),
+    sp.Images(
+        [model_a, model_b], path="frames/{row}_sharedbase_{col}_{overlay}.png",
+        stage_mode="overlay", overlays=["raw", "prediction"],
+        title="Models and modalities overlaid", width=150,
     ),
     title="Live dashboard demo",
     refresh=1,

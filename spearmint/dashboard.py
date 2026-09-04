@@ -296,43 +296,82 @@ def _table() -> str:
 
 
 def _dashboard_images(panel: dict) -> str:
-    """Filename-aligned stage rows, optionally stacked as translucent overlays."""
-    roots = {
-        key: rundb.latest_outdir(key) for key in panel.get("stages", [])
-    }
-    files = {
-        key: {str(p.relative_to(root)): p for p in Path(root).glob(panel.get("glob", "*.png"))}
-        for key, root in roots.items() if root and Path(root).is_dir()
-    }
-    names = sorted({name for by_name in files.values() for name in by_name})
+    """Grid coordinates and overlay layers captured from a relative path template."""
+    import string
+
+    template = panel.get("path", "{row}_{col}_{overlay}.png")
+    parsed = list(string.Formatter().parse(template))
+    fields = [name for _, name, _, _ in parsed if name]
+    glob = "".join(literal + ("*" if name else "") for literal, name, _, _ in parsed)
+    regex = "^" + "".join(
+        re.escape(literal) + (f"(?P<{name}>[^/]+?)" if name else "")
+        for literal, name, _, _ in parsed
+    ) + "$"
+    matcher = re.compile(regex)
+    images = []
+    for key in panel.get("stages", []):
+        root = rundb.latest_outdir(key)
+        if not root or not Path(root).is_dir():
+            continue
+        for path in Path(root).glob(glob):
+            rel = str(path.relative_to(root))
+            match = matcher.match(rel)
+            if match and path.is_file():
+                images.append({"stage": key.rsplit("/", 1)[-1], "path": path,
+                               **match.groupdict()})
+
+    def natural(value: str):
+        return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", value)]
+
+    def values(field: str, configured) -> "list[str]":
+        present = {im.get(field, "") for im in images}
+        return [str(v) for v in configured if str(v) in present] if configured is not None \
+            else sorted(present, key=natural)
+
+    row_values = values("row", panel.get("rows")) if "row" in fields else [""]
+    col_values = values("col", panel.get("columns")) if "col" in fields else [""]
+    overlay_values = values("overlay", panel.get("overlays")) if "overlay" in fields else [""]
+    stages = [key.rsplit("/", 1)[-1] for key in panel.get("stages", [])]
+    stage_mode = panel.get("stage_mode", "rows")
+    display_rows = [(stage, row) for stage in stages for row in row_values] \
+        if stage_mode == "rows" else [("", row) for row in row_values]
+    display_cols = [(stage, col) for stage in stages for col in col_values] \
+        if stage_mode == "columns" else [("", col) for col in col_values]
     title = f"<h2>{html.escape(panel.get('title', ''))}</h2>" if panel.get("title") else ""
     width = int(panel.get("width", 220))
 
-    def image(path: Path, opacity: float = 1.0) -> str:
-        rel = rundb._rel(str(path))
-        return (f'<img class="zoom" src="/file/{quote(rel)}" width="{width}" '
-                f'style="opacity:{opacity}" loading="lazy">')
-
-    if panel.get("overlay"):
-        cells = []
-        for name in names:
-            paths = [(key, files[key][name]) for key in files if name in files[key]]
-            layers = "".join(
-                f'<span title="{html.escape(key)}">{image(path, 1.0 if i == 0 else 0.5)}</span>'
-                for i, (key, path) in enumerate(paths)
+    def layers(row_stage: str, row: str, col_stage: str, col: str) -> str:
+        matched = [im for im in images
+                   if im.get("row", "") == row and im.get("col", "") == col
+                   and (not row_stage or im["stage"] == row_stage)
+                   and (not col_stage or im["stage"] == col_stage)
+                   and im.get("overlay", "") in overlay_values]
+        if stage_mode == "overlay":
+            matched.sort(key=lambda im: (stages.index(im["stage"]),
+                                         overlay_values.index(im.get("overlay", ""))))
+        else:
+            matched.sort(key=lambda im: overlay_values.index(im.get("overlay", "")))
+        rendered = []
+        for i, im in enumerate(matched):
+            rel = rundb._rel(str(im["path"]))
+            label = "/".join(v for v in (im["stage"] if stage_mode == "overlay" else "",
+                                          im.get("overlay", "")) if v)
+            rendered.append(
+                f'<span title="{html.escape(label)}"><img class="zoom" '
+                f'src="/file/{quote(rel)}" width="{width}" '
+                f'style="opacity:{1.0 if i == 0 else 0.5}" loading="lazy"></span>'
             )
-            cells.append(f'<td><div class="dashoverlay">{layers}</div></td>')
-        head = "".join(f"<th>{html.escape(n)}</th>" for n in names)
-        return title + f'<table class="imggrid"><tr>{head}</tr><tr>{"".join(cells)}</tr></table>'
+        return f'<div class="dashoverlay">{"".join(rendered)}</div>' if rendered else "–"
 
-    head = "".join(f"<th>{html.escape(n)}</th>" for n in names)
+    def axis_label(stage: str, value: str) -> str:
+        return " / ".join(v for v in (stage, value) if v) or "image"
+
+    head = "".join(f"<th>{html.escape(axis_label(*coord))}</th>" for coord in display_cols)
     rows = []
-    for key in panel.get("stages", []):
-        cells = "".join(
-            f"<td>{image(files[key][name]) if key in files and name in files[key] else '–'}</td>"
-            for name in names
-        )
-        rows.append(f"<tr><td>{html.escape(key.rsplit('/', 1)[-1])}</td>{cells}</tr>")
+    for row_stage, row in display_rows:
+        cells = "".join(f"<td>{layers(row_stage, row, col_stage, col)}</td>"
+                        for col_stage, col in display_cols)
+        rows.append(f"<tr><td>{html.escape(axis_label(row_stage, row))}</td>{cells}</tr>")
     return title + f'<table class="imggrid"><tr><th></th>{head}</tr>{"".join(rows)}</table>'
 
 
@@ -350,15 +389,32 @@ def _dashboard_page(prefix: str) -> str:
                 out = rundb.latest_outdir(key)
                 if out:
                     try:
-                        artifact = explorer._safe(out, panel.get("file", "metrics.jsonl"))
+                        artifact = explorer._safe(out, panel.get("path", "metrics.jsonl"))
                     except AssertionError:
                         continue
-                    series[key.rsplit("/", 1)[-1]] = load.rows(artifact)
+                    label = key.rsplit("/", 1)[-1]
+                    series[label] = [{**row, "stage": label} for row in load.rows(artifact)]
             sections.append(viz.lines(
                 series, x=panel.get("x"), y=panel.get("y"), color=panel.get("color"),
                 facet=panel.get("facet"), dash=panel.get("dash"), colors=panel.get("colors"),
                 logy=panel.get("logy", False), title=panel.get("title", ""),
                 height=panel.get("height"),
+            ))
+        elif panel.get("kind") == "table":
+            columns = {}
+            for key in panel.get("stages", []):
+                out = rundb.latest_outdir(key)
+                if not out:
+                    continue
+                try:
+                    artifact = explorer._safe(out, panel.get("path", "summary.json"))
+                except AssertionError:
+                    continue
+                columns[key.rsplit("/", 1)[-1]] = load.json_file(artifact)
+            sections.append(viz.table(
+                columns, metrics=panel.get("metrics"), title=panel.get("title", ""),
+                corner=panel.get("corner", panel.get("rows", "metric")),
+                transpose=panel.get("rows", "metric") == "stage",
             ))
         elif panel.get("kind") == "images":
             sections.append(_dashboard_images(panel))

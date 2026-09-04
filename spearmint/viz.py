@@ -216,7 +216,7 @@ def bars(
 
 
 def table(columns: "dict[str, dict]", metrics: "list[str] | None" = None, title: str = "",
-          corner: str = "metric") -> str:
+          corner: str = "metric", transpose: bool = False) -> str:
     """Pivoted metric table -> HTML fragment: {column label: {metric: value}} renders metric
     rows x label columns (mia-muvit's metric_table, generalized past two models). Nested dicts
     flatten to dotted keys; ``metrics``: key globs filtering AND ordering the rows (default:
@@ -232,13 +232,22 @@ def table(columns: "dict[str, dict]", metrics: "list[str] | None" = None, title:
             return _html.escape(str(v))
         return f"{v:.4g}"
 
-    head = f"<tr><th>{_html.escape(corner)}</th>" + "".join(f"<th>{_html.escape(str(c))}</th>" for c in flat) + "</tr>"
-    trs = "".join(
-        f"<tr><td>{_html.escape(k)}</td>"
-        + "".join(f"<td>{fmt(d[k]) if k in d else '–'}</td>" for d in flat.values())
-        + "</tr>"
-        for k in keys
-    )
+    if transpose:
+        head = f"<tr><th>{_html.escape(corner)}</th>" + \
+            "".join(f"<th>{_html.escape(k)}</th>" for k in keys) + "</tr>"
+        trs = "".join(
+            f"<tr><td>{_html.escape(str(label))}</td>"
+            + "".join(f"<td>{fmt(d[k]) if k in d else '–'}</td>" for k in keys)
+            + "</tr>" for label, d in flat.items()
+        )
+    else:
+        head = f"<tr><th>{_html.escape(corner)}</th>" + \
+            "".join(f"<th>{_html.escape(str(c))}</th>" for c in flat) + "</tr>"
+        trs = "".join(
+            f"<tr><td>{_html.escape(k)}</td>"
+            + "".join(f"<td>{fmt(d[k]) if k in d else '–'}</td>" for d in flat.values())
+            + "</tr>" for k in keys
+        )
     t = f"<h2>{_html.escape(title)}</h2>" if title else ""
     return f'{t}<table class="metrics">{head}{trs}</table>'
 

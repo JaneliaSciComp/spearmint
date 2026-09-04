@@ -123,10 +123,12 @@ Live monitoring is configuration, not a rendering process. The driver serializes
 
 ```python
 e.dashboard = sp.Dashboard(
-    sp.Lines([train_a, train_b], file="metrics.jsonl", x="step",
+    sp.Lines([train_a, train_b], path="metrics.jsonl", x="step",
              y=["loss", "val_*"], dash={"val_*": "dash"}, logy=True),
-    sp.Images([predict_a, predict_b], glob="slices/*.png",
-              align="filename", overlay=True),
+    sp.Table([train_a, train_b], path="summary.json", rows="metric", columns="stage",
+             metrics=["final_*", "best_*"]),
+    sp.Images([predict_a, predict_b],
+              path="slices/{row}_z{col}_{overlay}.png", stage_mode="rows"),
     title="my experiment", refresh=10,
 )
 ```

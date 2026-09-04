@@ -14,5 +14,5 @@ from . import dagrunner
 from . import load
 from . import rundb
 from .dagrunner import Config, Experiment, Stage, closure, run_experiment
-from .dashspec import Dashboard, Images, Lines
+from .dashspec import Dashboard, Images, Lines, Table
 from .rundb import run

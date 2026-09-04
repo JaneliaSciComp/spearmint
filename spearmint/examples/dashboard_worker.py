@@ -45,6 +45,7 @@ def main() -> None:
     with rundb.run() as run:
         rng = random.Random(args.model)
         metrics = Path(run.outdir) / "metrics.jsonl"
+        history = []
         with metrics.open("w") as f:
             for tick in range(80):
                 step = tick // 2
@@ -58,12 +59,24 @@ def main() -> None:
                     "accuracy": min(0.99, 0.45 + step / 85 - offset + rng.uniform(-0.01, 0.01)),
                     "iou": min(0.95, 0.30 + step / 100 - offset + rng.uniform(-0.015, 0.015)),
                 }
+                history.append(row)
                 f.write(json.dumps(row) + "\n")
                 f.flush()
                 if tick % 8 == 0:
-                    write_png(Path(run.outdir) / "frames" / f"frame_{tick // 8:02d}.png",
-                              args.model, tick // 8)
+                    image_i = tick // 8
+                    image_row = ("xy", "xz")[image_i % 2]
+                    image_col = image_i // 2
+                    for overlay, delta in (("raw", 0), ("prediction", 3)):
+                        name = f"{image_row}_sharedbase_{image_col:02d}_{overlay}.png"
+                        write_png(Path(run.outdir) / "frames" / name,
+                                  args.model, image_i + delta)
                 time.sleep(0.25)
+        (Path(run.outdir) / "summary.json").write_text(json.dumps({
+            "final_loss": history[-1]["loss"],
+            "best_val_loss": min(row["val_loss"] for row in history),
+            "final_accuracy": history[-1]["accuracy"],
+            "best_iou": max(row["iou"] for row in history),
+        }))
 
 
 if __name__ == "__main__":

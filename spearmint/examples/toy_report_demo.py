@@ -35,7 +35,7 @@ def render_report(run: O.rundb.Run) -> None:
 
 e.dashboard = O.Dashboard(
     O.Lines(
-        [train_a, train_b], file="metrics.jsonl", x="step", y=["loss", "val_*"],
+        [train_a, train_b], path="metrics.jsonl", x="step", y=["loss", "val_*"],
         dash={"val_*": "dash"}, colors={"train_a": "#58a6ff", "train_b": "#3fb950"},
         logy=True, title="live loss",
     ),
