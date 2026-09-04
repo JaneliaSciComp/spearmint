@@ -17,28 +17,34 @@ plumbing of its own (see script.py).
 WHO writes the db depends on how a run was launched. A bare run (no dagrunner) writes its own
 rows. A dagrunner-launched stage does NOT: sqlite's fcntl locking is unreliable when several
 compute nodes hit one db on a shared filesystem ("disk I/O error" under concurrency), so the
-DRIVER -- one process on one node, writes additionally serialized by _DB_LOCK -- inserts the
-wip row before launching (start_managed) and marks done/failed from the stage's exit code
-(finish_managed), threading the row identity to the child via $SPEARMINT_RUN_ROW/
+driver inserts the wip row before launching (start_managed) and marks done/failed from the
+stage's exit code (finish_managed). Independent drivers serialize their transactions through
+an NFS-safe directory lease, then thread the row identity to the child via $SPEARMINT_RUN_ROW/
 $SPEARMINT_RUN_OUTDIR, at which point the child's rundb.run() skips all db access (see run()).
 """
 
 import json
 import os
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
 import threading
+import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 
-# Serializes THIS process's db writes across threads (dagrunner's pool threads + main loop).
-# Cross-process/cross-node safety comes from the managed-run design above, not from locking.
+# Serializes this process's db writes across threads (dagrunner's pool threads + main loop).
+# _writer_lock below extends that serialization across independent drivers and hosts.
 _DB_LOCK = threading.Lock()
+_WRITER_LOCK_TIMEOUT = 120.0
+_WRITER_LOCK_STALE_AFTER = 300.0
+_WRITE_RETRIES = 5
 
 
 # --- ledger anchoring -------------------------------------------------------------------------
@@ -113,6 +119,85 @@ def default_root() -> str:
 
 def _db_path() -> str:
     return f"{root()}/rundb.db"
+
+
+@contextmanager
+def _writer_lock(timeout: float = _WRITER_LOCK_TIMEOUT):
+    """Serialize SQLite writers across driver processes and NFS clients.
+
+    SQLite's own advisory locks are not reliable enough on the shared cluster filesystem.
+    Creating a directory is atomic on NFS, so a sibling ``.writer-lock`` directory acts as a
+    short lease around each transaction. The token prevents a delayed owner from removing a
+    successor's lock. A hard-killed writer's lease is reclaimed after five minutes; ledger
+    transactions are normally milliseconds long.
+    """
+    lock = Path(f"{_db_path()}.writer-lock")
+    owner = lock / "owner.json"
+    token = uuid.uuid4().hex
+    deadline = time.monotonic() + timeout
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            lock.mkdir()
+            try:
+                owner.write_text(json.dumps({
+                    "token": token, "host": socket.gethostname(), "pid": os.getpid(),
+                    "created": time.time(), "lsf_jobid": os.environ.get("LSB_JOBID"),
+                }))
+            except BaseException:
+                shutil.rmtree(lock, ignore_errors=True)
+                raise
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - lock.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if age > _WRITER_LOCK_STALE_AFTER:
+                stale = lock.with_name(f"{lock.name}.stale-{uuid.uuid4().hex}")
+                try:
+                    lock.rename(stale)
+                except FileNotFoundError:
+                    continue
+                shutil.rmtree(stale, ignore_errors=True)
+                continue
+            if time.monotonic() >= deadline:
+                detail = owner.read_text(errors="replace") if owner.exists() else "unknown owner"
+                raise TimeoutError(f"timed out waiting for ledger writer lock {lock}: {detail}")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            current = json.loads(owner.read_text()).get("token")
+        except (FileNotFoundError, json.JSONDecodeError):
+            current = None
+        if current == token:
+            owner.unlink(missing_ok=True)
+            try:
+                lock.rmdir()
+            except FileNotFoundError:
+                pass
+
+
+def _write(action, *, retry: bool = True):
+    """Run one serialized write transaction, retrying safe transient failures."""
+    attempts = _WRITE_RETRIES if retry else 1
+    for attempt in range(attempts):
+        try:
+            with _DB_LOCK, _writer_lock():
+                conn = _connect()
+                try:
+                    with conn:
+                        return action(conn)
+                finally:
+                    conn.close()
+        except sqlite3.OperationalError as error:
+            transient = any(text in str(error).lower()
+                            for text in ("database is locked", "database is busy", "disk i/o error"))
+            if not transient or attempt + 1 == attempts:
+                raise
+            time.sleep(0.1 * 2**attempt)
 
 
 @dataclass
@@ -381,13 +466,11 @@ def _start(
     reuse = _latest("outdir", job_key, None) if mode in ("extend", "replace") else None
     if mode == "replace" and reuse is not None:
         shutil.rmtree(_abs(reuse), ignore_errors=True)
-    with _DB_LOCK:
-        conn = _connect()
-        with conn:
-            conn.execute(
+    def insert(conn):
+        conn.execute(
                 "INSERT OR IGNORE INTO git_diffs (hash, diff) VALUES (?, ?)", (diff_hash, diff)
             )
-            cur = conn.execute(
+        cur = conn.execute(
                 "INSERT INTO runs (job_key, argv0, argv_rest, outdir, pid, lsf_jobid, started_at, commit_id, diff_hash, inputs) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -396,24 +479,24 @@ def _start(
                     json.dumps(inputs) if inputs is not None else None,
                 ),
             )
-            run_id = cur.lastrowid
-            assert run_id is not None, "INSERT INTO runs did not produce a rowid"
-            out = reuse if reuse is not None else f"{job_key}/run{run_id:05d}"
-            Path(_abs(out)).mkdir(parents=True, exist_ok=True)
-            conn.execute("UPDATE runs SET outdir = ? WHERE run_id = ?", (out, run_id))
-        conn.close()
+        run_id = cur.lastrowid
+        assert run_id is not None, "INSERT INTO runs did not produce a rowid"
+        out = reuse if reuse is not None else f"{job_key}/run{run_id:05d}"
+        Path(_abs(out)).mkdir(parents=True, exist_ok=True)
+        conn.execute("UPDATE runs SET outdir = ? WHERE run_id = ?", (out, run_id))
+        return run_id, out
+    # An I/O error during COMMIT is ambiguous; unlike the updates below, replaying this INSERT
+    # could mint a duplicate attempt. Serialize it, but leave recovery to reconcile_wip.
+    run_id, out = _write(insert, retry=False)
     return Run(run_id=run_id, outdir=_abs(out), job_key=job_key)
 
 
 def _finish(run_id: int, status: str) -> None:
     assert status in ("done", "failed"), f"bad status {status!r}"
-    with _DB_LOCK:
-        conn = _connect()
-        with conn:
-            conn.execute(
-                "UPDATE runs SET status = ?, ended_at = ? WHERE run_id = ?", (status, _now(), run_id)
-            )
-        conn.close()
+    ended_at = _now()
+    _write(lambda conn: conn.execute(
+        "UPDATE runs SET status = ?, ended_at = ? WHERE run_id = ?", (status, ended_at, run_id)
+    ))
 
 
 def start_managed(job_key: str, mode: str, argv: "list[str]", inputs: "list[int]") -> Run:
@@ -437,13 +520,9 @@ def set_lsf_jobid(run_id: int, jobid: str) -> None:
     LSF job id (parsed from bsub's 'Job <id> is submitted' ack) -- after this, reconcile_wip
     tracks the stage job itself, which keeps running even if the driver dies. A freshly
     submitted job is by definition queued, so lsf_state starts at PEND here."""
-    with _DB_LOCK:
-        conn = _connect()
-        with conn:
-            conn.execute(
-                "UPDATE runs SET lsf_jobid = ?, lsf_state = 'PEND' WHERE run_id = ?", (jobid, run_id)
-            )
-        conn.close()
+    _write(lambda conn: conn.execute(
+        "UPDATE runs SET lsf_jobid = ?, lsf_state = 'PEND' WHERE run_id = ?", (jobid, run_id)
+    ))
 
 
 def set_lsf_state(run_id: int, state: str) -> None:
@@ -451,11 +530,9 @@ def set_lsf_state(run_id: int, state: str) -> None:
     parsed from bsub -K's own '<<Starting on ...>>' chatter as it streams past the driver (no
     bjobs polling). Pure display metadata: the wip/done/failed lifecycle doesn't depend on it,
     and it's only meaningful while status is wip."""
-    with _DB_LOCK:
-        conn = _connect()
-        with conn:
-            conn.execute("UPDATE runs SET lsf_state = ? WHERE run_id = ?", (state, run_id))
-        conn.close()
+    _write(lambda conn: conn.execute(
+        "UPDATE runs SET lsf_state = ? WHERE run_id = ?", (state, run_id)
+    ))
 
 
 @contextmanager

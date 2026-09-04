@@ -107,8 +107,9 @@ chain, upstream dirs passed via worker flags), `toy_fanout.py` (N loop-generated
 stages + a join that reads their dirs from `r.inputs` — the sweep shape), and a real-LSF smoke
 test (`cluster_smoke.py`).
 
-One constraint to know: only the driver process writes the ledger — stages it launches never
-touch the db (sqlite over a shared filesystem breaks under multi-node writes). Don't wrap your
+One constraint to know: only driver processes write the ledger — stages they launch never
+touch the db (sqlite over a shared filesystem breaks under multi-node writes). Independent
+drivers serialize their short transactions through an NFS-safe writer lease. Don't wrap your
 own independently-`bsub`bed jobs in `spearmint.run()` from many nodes at once; go through the
 scheduler, or keep bare runs on a single machine.
 
