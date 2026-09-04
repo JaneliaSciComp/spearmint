@@ -136,6 +136,12 @@ The generic viewer never imports or executes experiment code. See
 `spearmint/examples/toy_dashboard_demo.py` for multiple plots, faceting, explicit styles,
 filename-aligned images, and overlays updating during a 20-second run.
 
+After editing only the dashboard configuration, republish it without scheduling anything:
+
+```bash
+uv run python experiments/my_exp.py -d   # or --dashboard
+```
+
 ### Retrospective reports (Python)
 
 A polished report is an ordinary function stage. `spearmint.load` turns settled run outputs

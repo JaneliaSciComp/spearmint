@@ -188,17 +188,18 @@ class Experiment:
             ]))
         return run_experiment(self.stages, new=new, extend=extend, replace=replace)
 
-    def _write_dashboard(self) -> None:
+    def _write_dashboard(self) -> "Path | None":
         out = Path(rundb.root()) / self.prefix / ".dashboard.json"
         if self.dashboard is None:
             out.unlink(missing_ok=True)  # removing e.dashboard removes its rebuildable metadata
-            return
+            return None
         spec = self.dashboard.as_dict()
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(".json.tmp")
         import json
         tmp.write_text(json.dumps(spec, indent=2) + "\n")
         tmp.replace(out)
+        return out
 
     def savedir(self, stage: "Stage | str") -> "str | None":
         """A stage's latest DONE outdir (by object or name), or None -- what a report fn keys
@@ -249,7 +250,14 @@ class Experiment:
                        help="force STAGE(s) (+ dependents), clearing the existing dir first; globs ok")
         p.add_argument("--submit", action="store_true",
                        help="submit this invocation as the LSF driver job (login node)")
+        p.add_argument("-d", "--dashboard", action="store_true",
+                       help="publish the dashboard configuration and exit; run/submit nothing")
         a = p.parse_args(sys.argv[1:] if argv is None else argv)
+        if a.dashboard:
+            assert self.dashboard is not None, f"{self.prefix}: no dashboard configured"
+            path = self._write_dashboard()
+            print(f"dashboard published: {path}")
+            return None
         self._write_dashboard()
         if a.submit:
             from . import lsf  # local-only experiments never need the LSF module
