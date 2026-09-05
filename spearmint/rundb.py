@@ -215,11 +215,12 @@ class Run:
 def _connect(readonly: bool = False) -> sqlite3.Connection:
     """``readonly=True`` opens the ledger mode=ro -- no schema writes, no lock upgrades -- so
     pure readers (queries, report/dashboard, possibly running beside a live driver on another
-    node) never join the sqlite writer set over the shared filesystem. When no ledger exists yet
-    it falls through to the create path below and mints an empty one, so a fresh checkout's
-    first query still works."""
+    node) never join the sqlite writer set over the shared filesystem. A missing ledger is
+    an error for readers; only a writer may initialize it."""
     db = Path(_db_path())
-    if readonly and db.exists():
+    if readonly:
+        if not db.is_file():
+            raise FileNotFoundError(f"No run ledger at {db}; check the directory or run an experiment first")
         return sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=30)
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db, timeout=30)
@@ -253,6 +254,11 @@ def _connect(readonly: bool = False) -> sqlite3.Connection:
     for missing in {"lsf_jobid", "lsf_state"} - set(columns):
         conn.execute(f"ALTER TABLE runs ADD COLUMN {missing} TEXT")
     return conn
+
+
+def initialize() -> None:
+    """Explicit writer-side initialization; browsing and planning never create a ledger."""
+    _write(lambda conn: None)
 
 
 def _git(*args: str) -> str:
@@ -451,6 +457,8 @@ def _start(
     if mode is None:
         mode = _mode_from_env()
     assert mode in ("new", "extend", "replace"), f"bad mode {mode!r}"
+    if not Path(_db_path()).is_file():
+        initialize()
     reconcile_wip(job_key)
     _assert_not_running(job_key)
     if argv is None:

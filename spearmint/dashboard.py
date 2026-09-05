@@ -181,12 +181,17 @@ _SORT_JS = """
 
 _REFRESH_SCRIPT = f"""<script>
 async function pull() {{
+  try {{
   const r = await fetch('/table');
-  document.getElementById('table').innerHTML = await r.text();
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  document.getElementById('ledger-tables').innerHTML = await r.text();
   document.getElementById('meta').textContent =
     'updated ' + new Date().toLocaleTimeString() + ' ({REFRESH_SECONDS}s refresh)';
   window.spSort && window.spSort();  // re-apply each table's active column sort + sigil
   window.spSel && window.spSel();    // re-apply which experiment is selected
+  }} catch (error) {{
+    document.getElementById('meta').textContent = 'Refresh failed: ' + error.message;
+  }}
 }}
 setInterval(pull, {REFRESH_SECONDS} * 1000);
 </script>"""
@@ -256,6 +261,8 @@ def _table() -> str:
     kinds = {k: v for k, v in kinds.items() if v}  # only stages that actually have something
     dashboards = _dashboards(groups)
     dashboard_titles = {p: _dashboard_title(path) for p, path in dashboards.items()}
+    if not groups:
+        return f'<p>No runs in <code>{html.escape(rundb.root())}</code>.</p>'
     return report.render_html(groups, kinds=kinds, dashboards=dashboards,
                               dashboard_titles=dashboard_titles,
                               runs=report.collect_runs())
@@ -599,7 +606,14 @@ class _LedgerHandler(explorer.Handler):
         if self.path == "/table":
             self._send(_table())
         elif self.path == "/":
-            self._send(_page(_table(), live=True, title="spearmint status"))
+            from importlib.metadata import version
+
+            with rundb._connect(readonly=True) as conn:
+                count = conn.execute("SELECT count(*) FROM runs").fetchone()[0]
+            identity = (f'<p>Ledger: <code>{html.escape(rundb._db_path())}</code><br>'
+                        f'{count} recorded attempts at page load · Spearmint {version("spearmint")}</p>')
+            self._send(_page(identity + '<div id="ledger-tables">' + _table() + '</div>',
+                             live=True, title="spearmint status"))
         elif self.path.startswith("/file/"):
             self._serve_file(unquote(self.path[len("/file/"):]), rundb.root())
         elif self.path.startswith("/run/"):

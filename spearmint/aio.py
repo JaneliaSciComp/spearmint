@@ -271,6 +271,8 @@ class Ctx:
             assert caller, "can't locate the experiment file -- pass repo= explicitly"
             repo = rundb._git_root(str(Path(caller).resolve().parent))
         rundb.anchor(root or f"{repo}/output_rundb", repo=repo)
+        if not Path(rundb._db_path()).is_file():
+            rundb.initialize()
         self.prefix = prefix
         self.cmd_prefix = list(cmd_prefix or [])
         self.forced = forced or {"new": [], "extend": [], "replace": []}
