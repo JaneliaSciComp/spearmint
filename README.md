@@ -117,6 +117,14 @@ A second driver over the same experiment is fine: stages whose job_key is live u
 first driver just wait (`[wait]` printed) for that run to close, then skip or launch as
 usual — so you can force-rerun a failed stage while a long train keeps running.
 
+Preview scheduling with `python experiments/my_exp.py --plan`. This reads the ledger without
+executing command functions, submitting jobs, reconciling LSF state, or publishing dashboards.
+It explains each `run`, `skip`, or `wait`; waiting stages are re-evaluated at execution time.
+Completed stages skip only when their recorded input run IDs match the current dependencies,
+including their order. Added/removed dependencies and new upstream attempts rerun downstream
+work. Older attempts with unknown input provenance rerun once to establish it. Code changes
+alone still require an explicit force flag. External shared stages are recorded as inputs too.
+
 ### Live dashboards (declarative)
 
 Live monitoring is configuration, not a rendering process. The driver serializes the spec;

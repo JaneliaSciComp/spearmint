@@ -104,6 +104,8 @@ class Job:
         self._cmd = None
         self._outdir_args: "list[str] | None" = None
         self._env: "dict[str, str]" = {}
+        self._external_inputs: "list[rundb.Run]" = []
+        self._input_keys: "list[str] | None" = None
         self._base_cmd: "list[str]" = []
         self._argv: "list[str]" = []  # what the ledger records
         self._row: "rundb.Run | None" = None
@@ -167,9 +169,8 @@ class Job:
     def _final_cmd(self, deps: "tuple[Job, ...]") -> "list[str]":
         row = self._row
         assert row is not None
-        inputs_env = (
-            [f"SPEARMINT_INPUTS={os.pathsep.join(d._row.outdir for d in deps)}"] if deps else []
-        )
+        inputs = self._inputs(deps)
+        inputs_env = [f"SPEARMINT_INPUTS={os.pathsep.join(d.outdir for d in inputs)}"]
         # Launcher-prefix elements holding a "{}" are formatted with the minted outdir (the
         # row exists by now) -- how lsf's "-oo {}/log.txt" lands each attempt's log in its own
         # run dir. Only the prefix: worker argv may contain literal braces (hydra overrides).
@@ -191,13 +192,13 @@ class Job:
     async def _run(self, deps: "tuple[Job, ...]", forced: "str | None") -> str:
         if deps:
             await asyncio.gather(*deps)  # a failed dep raises JobFailed here -> we cascade
-        if self._row is None:  # not minted in submit(): dep-carrying, or dep-free deferred
+        while self._row is None:  # a competing driver can win insertion after our read
             # behind another process's live run. The skip/mode decision happens HERE, not at
             # submit -- whether a dep actually re-ran (.ran) is only knowable once the deps
             # resolved, and a live job_key must close before its ledger state means anything.
             await _wait_not_running(self.name, self.job_key)
-            dep_ran = any(d.ran for d in deps)
-            if forced is None and not dep_ran and rundb.is_done(self.job_key):
+            decision = rundb.decide(self.job_key, [r.run_id for r in self._inputs(deps)], forced)
+            if decision.action == "skip":
                 self._row = _done_row(self.job_key)
                 self.skipped = True
                 _skip_print(self.name, self.job_key)
@@ -210,8 +211,8 @@ class Job:
             self._resolve_spec()
             try:
                 self._ctx._insert_row(self, deps)
-            except AssertionError as e:  # lost the cross-process TOCTOU race: fail THIS stage
-                raise JobFailed(self.job_key, f"launch refused: {e}")
+            except rundb.RunBusy:
+                continue  # recheck/wait using the same decision after the winner completes
         cmd = self._final_cmd(deps)
         async with self._ctx._sem:  # cap concurrent child processes (Ctx max_parallel)
             print(f"[run] {self.name}: {' '.join(cmd)}", flush=True)
@@ -257,6 +258,15 @@ class Job:
         return self._row.outdir
 
 
+    def _inputs(self, deps) -> "list[rundb.Run]":
+        records = [d._row for d in deps] + self._external_inputs
+        assert all(r is not None for r in records), "dependencies must resolve before launch"
+        if self._input_keys is not None:
+            by_key = {r.job_key: r for r in records}
+            return [by_key[key] for key in self._input_keys]
+        return records
+
+
 class Ctx:
     """The submission context: anchors the ledger like dagrunner.Experiment (repo/root from
     the experiment file's own location), carries the experiment-wide cmd_prefix and the CLI
@@ -289,13 +299,15 @@ class Ctx:
         return None
 
     def _insert_row(self, job: Job, deps: "tuple[Job, ...]") -> None:
-        input_ids = [d.run_id for d in deps if d.run_id is not None]
+        input_ids = [r.run_id for r in job._inputs(deps)]
         job._row = rundb.start_managed(job.job_key, job._mode, argv=job._argv, inputs=input_ids)
 
     def submit(self, name: str, cmd, deps: "tuple[Job, ...] | list[Job]" = (),
                cmd_prefix=None, outdir_args: "list[str] | None" = None,
                key: "str | None" = None, force: "str | None" = None,
-               env: "dict[str, str] | None" = None) -> Job:
+               env: "dict[str, str] | None" = None,
+               external_inputs: "list[rundb.Run] | None" = None,
+               input_keys: "list[str] | None" = None) -> Job:
         """Submit a job (ledger-memoized). ``cmd`` is the worker's own argv -- a list, or a
         CALLABLE returning one, evaluated only after ``deps`` are done (so it may reference
         their savedirs: the Stage-lambda pattern). ``deps`` are awaited before launch,
@@ -320,6 +332,8 @@ class Ctx:
         job._cmd = cmd
         job._outdir_args = outdir_args
         job._env = dict(env or {})
+        job._external_inputs = list(external_inputs or [])
+        job._input_keys = input_keys
         if not deps:
             # Dep-free jobs decide NOW when they can: a done row skips immediately (even if a
             # NEWER attempt is live under another driver -- a completed result exists), and a
@@ -329,16 +343,20 @@ class Ctx:
             # (Job._run), which waits for the row to close (reconciling each lap, so a stale
             # one frees up in one lap) and then re-decides; such a job's .outdir is not
             # available at submit time.
-            if forced is None and rundb.is_done(job_key):
+            decision = rundb.decide(job_key, [r.run_id for r in job._inputs(())], forced)
+            if decision.action == "skip":
                 job._row = _done_row(job_key)
                 job.skipped = True
                 _skip_print(name, job_key)
                 job._task = asyncio.get_running_loop().create_task(_done(job._row.outdir))
                 return job
-            if rundb.latest_outdir(job_key, status="wip") is None:
+            if decision.action == "run":
                 job._mode = forced or "new"  # fresh dir; a failed attempt's dir stays as evidence
                 job._resolve_spec()
-                self._insert_row(job, deps)
+                try:
+                    self._insert_row(job, deps)
+                except rundb.RunBusy:
+                    pass  # defer to _run's wait/recheck loop
         job._task = asyncio.get_running_loop().create_task(job._run(deps, forced))
         return job
 

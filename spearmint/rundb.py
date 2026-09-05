@@ -393,15 +393,17 @@ def reconcile_wip(job_key: str) -> None:
             _finish(run_id, "failed")
 
 
+class RunBusy(RuntimeError):
+    """Another driver owns an unfinished attempt of this stage."""
+
+
 def _assert_not_running(job_key: str) -> None:
     """Raise if job_key has a genuinely still-alive 'wip' row (call reconcile_wip(job_key) first
     so only a truly-live one remains) -- refuses to start/replace/wipe while another process is
     actively working on the same job_key, rather than silently racing it."""
     still_running = latest_outdir(job_key, status="wip")
-    assert still_running is None, (
-        f"job_key {job_key!r} already has a run in progress (outdir {still_running!r}) -- "
-        f"refusing to proceed while it's live"
-    )
+    if still_running is not None:
+        raise RunBusy(f"job_key {job_key!r} already has a run in progress ({still_running})")
 
 
 def _start(
@@ -471,10 +473,18 @@ def _start(
     diff_hash = sha256(diff.encode()).hexdigest()
     # Raw stored (relative) value, not latest_outdir's absolute form -- what we re-store must
     # stay relative, and _abs tolerates a legacy absolute row either way.
-    reuse = _latest("outdir", job_key, None) if mode in ("extend", "replace") else None
-    if mode == "replace" and reuse is not None:
-        shutil.rmtree(_abs(reuse), ignore_errors=True)
     def insert(conn):
+        # Check ownership under the same writer lease as insertion and directory clearing.
+        # Two drivers may both pass the advisory check above before either inserts its row.
+        live = conn.execute("SELECT run_id FROM runs WHERE job_key=? AND status='wip'",
+                            (job_key,)).fetchone()
+        if live is not None:
+            raise RunBusy(f"job_key {job_key!r} already has a run in progress")
+        previous = conn.execute("SELECT outdir FROM runs WHERE job_key=? "
+                                "ORDER BY run_id DESC LIMIT 1", (job_key,)).fetchone()
+        reuse = previous[0] if previous and mode in ("extend", "replace") else None
+        if mode == "replace" and reuse is not None:
+            shutil.rmtree(_abs(reuse), ignore_errors=True)
         conn.execute(
                 "INSERT OR IGNORE INTO git_diffs (hash, diff) VALUES (?, ?)", (diff_hash, diff)
             )
@@ -625,6 +635,40 @@ def is_done(job_key: str) -> bool:
     tell the same story. (An older success still stands for readers: savedir/latest_outdir
     (status="done") and staleness all keep resolving to the latest DONE run.)"""
     return _latest("status", job_key, None) == "done"
+
+
+@dataclass(frozen=True)
+class Decision:
+    action: str  # run / skip / wait
+    reason: str
+
+
+def decide(job_key: str, inputs: "list[int]", force: "str | None" = None) -> Decision:
+    """Read-only scheduling decision over the current DAG's resolved input attempts.
+
+    Code changes alone do not invalidate completed work. Input order is significant because
+    workers receive dependency directories in that order. Unknown old provenance reruns.
+    """
+    if not Path(_db_path()).is_file():
+        return Decision("run", "no prior attempt")
+    with _connect(readonly=True) as conn:
+        live = conn.execute("SELECT run_id FROM runs WHERE job_key=? AND status='wip'",
+                            (job_key,)).fetchone()
+        row = conn.execute("SELECT status, inputs FROM runs WHERE job_key=? "
+                           "ORDER BY run_id DESC LIMIT 1", (job_key,)).fetchone()
+    if live:
+        return Decision("wait", f"attempt {live[0]} is unfinished; reconcile before launching")
+    if force:
+        return Decision("run", f"forced {force}")
+    if row is None:
+        return Decision("run", "no prior attempt")
+    if row[0] != "done":
+        return Decision("run", f"latest attempt is {row[0]}")
+    if row[1] is None:
+        return Decision("run", "prior input provenance is unknown")
+    if json.loads(row[1]) != inputs:
+        return Decision("run", "dependency attempts changed (including order/additions/removals)")
+    return Decision("skip", "completed with the same dependency attempts")
 
 
 def started_at(job_key: str, status: "str | None" = None) -> "str | None":

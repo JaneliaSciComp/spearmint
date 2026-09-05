@@ -243,19 +243,17 @@ class Experiment:
                        help="force STAGE(s) (+ dependents), clearing the existing dir first; globs ok")
         p.add_argument("--submit", action="store_true",
                        help="submit this invocation as the LSF driver job (login node)")
+        p.add_argument("--plan", action="store_true",
+                       help="explain run/skip/wait decisions without writes or execution")
         p.add_argument("-d", "--dashboard", action="store_true",
                        help="publish the dashboard configuration and exit; run/submit nothing")
         a = p.parse_args(sys.argv[1:] if argv is None else argv)
+        if a.plan and (a.dashboard or a.submit):
+            p.error("--plan cannot be combined with --dashboard or --submit")
         if a.dashboard:
             assert self.dashboard is not None, f"{self.prefix}: no dashboard configured"
             path = self._write_dashboard()
             print(f"dashboard published: {path}")
-            return None
-        self._write_dashboard()
-        if a.submit:
-            from . import lsf  # local-only experiments never need the LSF module
-
-            lsf.submit_driver(sys.argv[0], *(x for x in sys.argv[1:] if x != "--submit"))
             return None
         by_name = {s.name: s for s in self.stages}
 
@@ -276,7 +274,16 @@ class Experiment:
                 out += [s for s in hits if s not in out]
             return out
 
-        status = self.run(new=resolve(a.new), extend=resolve(a.extend), replace=resolve(a.replace))
+        forces = dict(new=resolve(a.new), extend=resolve(a.extend), replace=resolve(a.replace))
+        if a.plan:
+            return run_experiment(self.stages, **forces, plan=True)
+        self._write_dashboard()
+        if a.submit:
+            from . import lsf
+
+            lsf.submit_driver(sys.argv[0], *(x for x in sys.argv[1:] if x != "--submit"))
+            return None
+        status = self.run(**forces)
         print(status)
         return status
 
@@ -345,6 +352,7 @@ def run_experiment(
     new: "list[Stage] | None" = None,
     extend: "list[Stage] | None" = None,
     replace: "list[Stage] | None" = None,
+    plan: bool = False,
 ) -> "dict[str, str]":
     """Lower the static plan onto the aio core and run it to completion. Every stage becomes
     one ``aio.Ctx.submit`` whose deps are its local requires -- ordering, skip-if-done, the
@@ -371,6 +379,8 @@ def run_experiment(
         for s in group or []:
             seed_mode[s] = mode_name
     order = _topo_order(stages)  # deterministic submit order + the cycle assert
+    if plan:
+        return _explain_plan(order, local, seed_mode)
 
     # Externals never run in this pass, so their state is fixed: resolve every one's savedir
     # (confirming it's actually done) before anything launches.
@@ -378,7 +388,8 @@ def run_experiment(
         external_not_done = []
         for d in s.requires:
             if d not in local:
-                d._savedir = rundb.latest_outdir(d.job_key, status="done")
+                d._savedir = (rundb.latest_outdir(d.job_key, status="done")
+                              if Path(rundb._db_path()).exists() else None)
                 if d._savedir is None:
                     external_not_done.append(d.job_key)
         assert not external_not_done, (
@@ -388,6 +399,33 @@ def run_experiment(
 
     assert rundb._ANCHOR is not None  # Experiment() anchored when the stages were declared
     return asyncio.run(_run_plan(order, local, seed_mode))
+
+
+def _explain_plan(order, local, seed_mode) -> "dict[str, str]":
+    """Snapshot forecast: never resolves command lambdas, reconciles, or writes metadata."""
+    decisions = {}
+    exists = Path(rundb._db_path()).is_file()
+    for stage in order:
+        inputs = []
+        blocked = []
+        changed = []
+        for dep in stage.requires:
+            action = decisions.get(dep.job_key)
+            rid = rundb.latest_run_id(dep.job_key, status="done") if exists else None
+            if action == "wait" or (dep not in local and rid is None):
+                blocked.append(dep.job_key)
+            elif action == "run":
+                changed.append(dep.job_key)
+            if rid is not None:
+                inputs.append(rid)
+        decision = rundb.decide(stage.job_key, inputs, seed_mode.get(stage))
+        if blocked:
+            decision = rundb.Decision("wait", f"dependencies unresolved: {', '.join(blocked)}")
+        elif changed and decision.action != "wait":
+            decision = rundb.Decision("run", f"dependencies will rerun: {', '.join(changed)}")
+        decisions[stage.job_key] = decision.action
+        print(f"[{decision.action}] {stage.job_key}: {decision.reason}")
+    return decisions
 
 
 async def _run_plan(order, local, seed_mode) -> "dict[str, str]":
@@ -417,6 +455,8 @@ async def _run_plan(order, local, seed_mode) -> "dict[str, str]":
             s.name, cmd=cmd, deps=[jobs[d] for d in s.requires if d in local],
             cmd_prefix=s.prefix, key=s.job_key, force=seed_mode.get(s),
             outdir_args=s.outdir_args, env=env,
+            external_inputs=[aio._done_row(d.job_key) for d in s.requires if d not in local],
+            input_keys=[d.job_key for d in s.requires],
         )
         jobs[s]._task.add_done_callback(_stash_savedir(s, jobs[s]))
     tasks = [jobs[s]._task for s in order]
