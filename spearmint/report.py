@@ -38,6 +38,7 @@ class JobRow:
     ended_at: "str | None"
     total: timedelta
     avg: timedelta  # total / n_runs -- typical wall clock of ONE attempt
+    last: timedelta  # latest attempt runtime; grows on each refresh while wip
     stale: "list[str] | None"  # None = provenance unknown (run not launched by dagrunner)
     outdir: str  # ABSOLUTE latest outdir (any status) -- consumers never re-query for it
 
@@ -95,6 +96,7 @@ def collect() -> "dict[str, list[JobRow]]":
             ended_at=ended,
             total=totals[job_key],
             avg=totals[job_key] / counts[job_key],
+            last=rundb._duration(started, ended),
             stale=stale(job_key),
             outdir=rundb._abs(outdir),
         )
@@ -216,6 +218,7 @@ def _exp_row_html(group: str, rs: "list[JobRow]", title: str, view_html: str, op
     avgs = sorted(r.avg.total_seconds() for r in rs)
     spark = f' <span class="mark">{_spark(avgs)}</span>' if len(rs) >= 4 else ""
     totals = sorted(r.total for r in rs)
+    latest = max(rs, key=lambda r: r.started_at)
     n_stale = sum(1 for r in rs if r.stale)
     stale = "n/a" if all(r.stale is None for r in rs) else (f"{n_stale} stale" if n_stale else "no")
     short, _ = _exp_names(group)
@@ -231,7 +234,8 @@ def _exp_row_html(group: str, rs: "list[JobRow]", title: str, view_html: str, op
         f'<td title="per stage: min {_fmt_td(totals[0])} · max {_fmt_td(totals[-1])}">{_fmt_td(total)}</td>'
         f'<td title="per stage: min {_fmt_td(timedelta(seconds=avgs[0]))} · max '
         f'{_fmt_td(timedelta(seconds=avgs[-1]))}">{_fmt_td(avg)}{spark}</td>'
-        f"<td>{fmt_ts(max(r.started_at for r in rs))}</td>"
+        f"<td>{_fmt_td(latest.last)}</td>"
+        f"<td>{fmt_ts(latest.started_at)}</td>"
         f'<td class="stale">{stale}</td>'
         "</tr>"
     )
@@ -308,6 +312,7 @@ def render_html(
                 stale = f'<span class="stale-deps">{deps}</span>'
             total = str(r.total).split(".")[0]
             avg = str(r.avg).split(".")[0]
+            last = _fmt_td(r.last)
             key_link = f'/run/{quote(r.job_key)}'  # job_key slashes are real path structure
             have = kinds.get(r.job_key, set())
             marks = "".join(CONTENT_SYMBOLS[k] for k in CONTENT_SYMBOLS if k in have)
@@ -326,6 +331,7 @@ def render_html(
                 f"<td>{r.n_runs}</td>"
                 f"<td>{total}</td>"
                 f"<td>{avg}</td>"
+                f"<td>{last}</td>"
                 f"<td>{fmt_ts(r.started_at)}</td>"
                 f'<td class="stale">{stale}</td>'
                 "</tr>"
@@ -350,11 +356,12 @@ def render_html(
                 )
     exp_header = (
         "<tr><th>exp</th><th>title</th><th>dashboard</th><th>stages</th>"
-        "<th>status</th><th>runs</th><th>total</th><th>avg</th><th>last</th><th>stale</th></tr>"
+        "<th>status</th><th>runs</th><th>total</th><th>avg</th><th>last</th>"
+        "<th>last starttime</th><th>stale</th></tr>"
     )
     header = (
         "<tr><th>stage</th><th>status</th><th>runs</th><th>total</th><th>avg</th>"
-        "<th>last</th><th>stale</th></tr>"
+        "<th>last</th><th>last starttime</th><th>stale</th></tr>"
     )
     run_header = (
         "<tr><th>id</th><th>status</th><th>runtime</th><th>started</th><th>ended</th>"
