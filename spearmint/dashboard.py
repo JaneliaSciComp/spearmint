@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
@@ -125,9 +126,15 @@ _SORT_JS = """
     var exps = document.getElementById("exps"), stages = document.getElementById("stages"),
         runs = document.getElementById("runs");
     if (!exps || !stages) return;
-    if (!selInit) {
+    if (!selInit || !exps.querySelector("tr.exp.sel")) {
+      // An initially empty ledger may gain its first experiment during a refresh.
+      // Preserve a prior selection when that experiment still exists in the new fragment.
+      var present = Array.from(exps.querySelectorAll("tr.exp")).some(r => r.dataset.grp === sel);
+      if (!present) {
       var d = exps.querySelector("tr[data-open]");
       sel = d ? d.dataset.grp : null;
+      selKey = null;
+      }
       selInit = true;
     }
     exps.querySelectorAll("tr.exp").forEach(function(r){
@@ -608,7 +615,7 @@ class _LedgerHandler(explorer.Handler):
         elif self.path == "/":
             from importlib.metadata import version
 
-            with rundb._connect(readonly=True) as conn:
+            with closing(rundb._connect(readonly=True)) as conn:
                 count = conn.execute("SELECT count(*) FROM runs").fetchone()[0]
             identity = (f'<p>Ledger: <code>{html.escape(rundb._db_path())}</code><br>'
                         f'{count} recorded attempts at page load · Spearmint {version("spearmint")}</p>')

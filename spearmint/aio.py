@@ -1,5 +1,4 @@
-"""Async execution core -- PROTOTYPE for the bakeoff against the sidecar DAG bolt-on (see
-sidecar.md; neither is the winner yet, dagrunner is untouched and both coexist).
+"""Async execution core underlying the declarative DAG and dynamic experiment programs.
 
 An experiment file is an async program: ``ctx.submit(name, cmd)`` returns an awaitable Job,
 ``await job`` is a dependency edge, and lifecycle coupling (validators, sidecars, retry loops)
@@ -22,7 +21,7 @@ re-running an experiment file does today.
         aio.main(main, prefix="e07", cmd_prefix=["uv", "run", "python"])
 
 Same ledger contract as dagrunner: this driver is the only db writer; children get the
-``env SPEARMINT_*`` identity prefix and never touch the db. Known prototype limitation vs the
+``env SPEARMINT_*`` identity prefix and never touch the db. Unlike the declarative
 DAG: there is no static plan -- force flags resolve against names as they're submitted (a
 pattern matching nothing warns at the end instead of failing up front), and the status table
 only shows jobs the program has reached."""
@@ -66,9 +65,8 @@ def _signal(proc, jobid: "str | None") -> None:
 
 async def _wait_not_running(name: str, job_key: str) -> None:
     """Block this job while ANOTHER process holds a live wip row for job_key -- a second
-    driver waits for the first, per stage, instead of dying on rundb's guard. Each lap
-    reconciles first, so a crash-killed holder (SIGKILL, node death) flips to failed and
-    frees us within one poll; the guard in rundb._start stays as the TOCTOU backstop."""
+    driver waits for the first, per stage. Each lap checks for durable completion evidence;
+    an unknown outcome remains unfinished and must not release ownership."""
     waited = False
     while True:
         rundb.reconcile_wip(job_key)
@@ -76,7 +74,7 @@ async def _wait_not_running(name: str, job_key: str) -> None:
         if live is None:
             return
         if not waited:
-            print(f"[wait] {name}: {job_key} live in another process ({live}) -- waiting", flush=True)
+            print(f"[wait] {name}: {job_key} unfinished ({live}) -- waiting for completion evidence", flush=True)
             waited = True
         await asyncio.sleep(WAIT_POLL_SECONDS)
 
@@ -177,6 +175,16 @@ class Job:
         npre = len(self._prefix)
         base = [a.format(row.outdir) if i < npre and "{}" in a else a
                 for i, a in enumerate(self._base_cmd)]
+        suffix = [a.format(row.outdir) for a in self._outdir_args or []]
+        if "bsub" in self._prefix:
+            # lsf.cpu/gpu prefixes end in the worker's Python interpreter. The wrapper must
+            # run AFTER bsub on the compute node, never around the submitting bsub client.
+            assert re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", Path(self._prefix[-1]).name), \
+                "LSF prefixes must end with a Python interpreter for the completion wrapper"
+            payload = [*base[:npre], "-m", "spearmint.worker", "--python", "--",
+                       *base[npre:], *suffix]
+        else:
+            payload = [sys.executable, "-m", "spearmint.worker", "--", *base, *suffix]
         return [
             "env",
             f"SPEARMINT_JOB_KEY={self.job_key}",
@@ -185,8 +193,7 @@ class Job:
             f"SPEARMINT_RUN_OUTDIR={row.outdir}",
             *(f"{k}={v}" for k, v in self._env.items()),
             *inputs_env,
-            *base,
-            *(a.format(row.outdir) for a in self._outdir_args or []),
+            *payload,
         ]
 
     async def _run(self, deps: "tuple[Job, ...]", forced: "str | None") -> str:
@@ -242,6 +249,12 @@ class Job:
             except asyncio.CancelledError:  # loop teardown (e.g. ctrl-c), NOT job.cancel()
                 if self._proc is not None and self._proc.returncode is None:
                     _signal(self._proc, self._jobid)
+                self._close(ok=False)
+                raise
+            except Exception:
+                if self._proc is not None and self._proc.returncode is None:
+                    _signal(self._proc, self._jobid)
+                    await self._proc.wait()
                 self._close(ok=False)
                 raise
             finally:
@@ -315,8 +328,8 @@ class Ctx:
         ``cmd_prefix`` overrides the ctx-wide one (a list, or a callable receiving the job_key
         -- lsf.gpu()/cpu() work unchanged). ``key``/``force`` are the AOT layer's hooks: a full
         job_key override, and an explicit mode bypassing the CLI pattern matching. Skip rule
-        mirrors the DAG scheduler: LATEST attempt done + not forced + no dep re-ran this
-        session -> skip (a failed last attempt reruns even over an older success); every
+        mirrors the DAG scheduler: latest attempt done, not forced, and identical recorded
+        dependency attempts -> skip (a failed last attempt reruns even over an older success); every
         unforced launch defaults to mode "new" -- a fresh dir, the failed attempt kept as
         evidence -- and a force/cascade uses its named mode."""
         deps = tuple(deps)
@@ -335,14 +348,9 @@ class Ctx:
         job._external_inputs = list(external_inputs or [])
         job._input_keys = input_keys
         if not deps:
-            # Dep-free jobs decide NOW when they can: a done row skips immediately (even if a
-            # NEWER attempt is live under another driver -- a completed result exists), and a
-            # launching job with no wip row is minted synchronously so job.outdir is
-            # immediately usable (validators). Only a would-launch job behind a visible wip
-            # row -- live under another driver, or stale from a crash -- defers into the task
-            # (Job._run), which waits for the row to close (reconciling each lap, so a stale
-            # one frees up in one lap) and then re-decides; such a job's .outdir is not
-            # available at submit time.
+            # Resolve dep-free jobs immediately when possible so validators can access
+            # job.outdir at submit time. Unfinished attempts defer to _run's reconciliation
+            # loop; both paths use the same input/force/ownership decision.
             decision = rundb.decide(job_key, [r.run_id for r in job._inputs(())], forced)
             if decision.action == "skip":
                 job._row = _done_row(job_key)

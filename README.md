@@ -125,6 +125,20 @@ including their order. Added/removed dependencies and new upstream attempts reru
 work. Older attempts with unknown input provenance rerun once to establish it. Code changes
 alone still require an explicit force flag. External shared stages are recorded as inputs too.
 
+Managed workers publish `exit.<run_id>.json` atomically in their output directory, without
+accessing SQLite. The wrapper runs on the compute node for LSF stages. Recovery drivers
+adopt its exit code and finish timestamp even if the original driver disappeared. Receipts
+are specific to attempts, so `--extend` never mistakes an older receipt for a new completion.
+Confirmed `bjobs` DONE/EXIT states can also settle a known stage job. Missing evidence or a
+failed scheduler lookup leaves the attempt unfinished and blocks another launch; it does
+not prove failure. Hard kills may prevent receipt writing. Checkpoints and the training
+budget remain the worker application's responsibility.
+
+The browser shows the absolute ledger path and package version. Read-only access never
+creates a missing ledger, and an empty ledger displays its path explicitly.
+
+Run the isolated lifecycle checks with `python -m unittest discover -s tests -v`.
+
 ### Live dashboards (declarative)
 
 Live monitoring is configuration, not a rendering process. The driver serializes the spec;

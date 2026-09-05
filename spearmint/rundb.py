@@ -33,7 +33,7 @@ import sys
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -334,63 +334,57 @@ def _managed_from_env() -> "tuple[int, str] | None":
     return int(run_id), os.environ["SPEARMINT_RUN_OUTDIR"]
 
 
-def _lsf_alive(jobid: str) -> bool:
-    """Liveness of an LSF job by id, via ``bjobs -o stat -noheader <id>``. Alive iff the state
-    is pending/running/suspended-ish. An UNKNOWN id counts as dead: bjobs forgets finished jobs
-    after its clean period (~1h), so a still-'wip' row whose jobid bjobs can't find means the
-    job ended long ago without _finish running (hard kill / node death) -- exactly the case
-    reconcile_wip exists to correct. A false-dead flip self-heals: _finish updates the row
-    unconditionally when the process actually exits cleanly."""
-    try:
-        result = subprocess.run(
-            ["bjobs", "-o", "stat", "-noheader", jobid], capture_output=True, text=True
-        )
-    except FileNotFoundError:
-        raise AssertionError(
-            "bjobs not on PATH -- reconcile LSF-launched rows on the cluster, not locally"
-        ) from None
-    state = result.stdout.strip().split()[0] if result.stdout.strip() else ""
-    return state in ("PEND", "RUN", "PSUSP", "USUSP", "SSUSP", "PROV", "WAIT")
-
-
-def _pid_alive(pid: int) -> bool:
-    """Best-effort local liveness check (POSIX) -- os.kill(pid, 0) sends no actual signal, it
-    just checks whether this process could signal `pid` at all. Only meaningful for a pid
-    recorded by a process on THIS machine -- spearmint only ever runs local subprocesses today, so
-    that's the only case that comes up; a future remote/cluster-submitted stage would need its
-    own platform-specific check (e.g. `bjobs`) instead of this. Known limitation: pids can be
-    reused by the OS after a process exits, so a stale pid could in rare cases collide with an
-    unrelated live process and be (wrongly) reported alive -- acceptable for a local dev-loop
-    tool, not something this checks further."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists, just not ours to signal
-    return True
-
-
 def reconcile_wip(job_key: str) -> None:
-    """For every row still marked 'wip' under job_key, check whether the process that started it
-    is actually still alive -- via bjobs when the row recorded an LSF job id (the pid lives on
-    some compute node and means nothing here), else via its pid (same-machine assumption). If
-    dead, it crashed hard enough (e.g. SIGKILL, node death) to bypass rundb.run()'s own
-    except/finally cleanup, so mark it 'failed' now instead of leaving it 'wip' forever. A row
-    whose process IS still alive is left untouched -- it's still genuinely running, not stale;
-    "wip" is assumed to mean what it says unless disproven. Called automatically by _start() and
-    wipe() before deciding what to reuse/clear/delete, and by gc() before deciding what's safe
-    to remove -- never something a caller needs to remember to call itself, but also callable
-    directly."""
+    """Adopt durable worker receipts, or confirmed LSF completion for a known stage job.
+
+    Missing receipts and inconclusive scheduler lookups leave the attempt unfinished. A
+    driver PID disappearing proves neither worker death nor success. Unknown attempts block
+    reuse until completion evidence is available; readers never perform reconciliation.
+    """
     conn = _connect(readonly=True)
     rows = conn.execute(
-        "SELECT run_id, pid, lsf_jobid FROM runs WHERE job_key = ? AND status = 'wip'", (job_key,)
+        "SELECT run_id, outdir, lsf_jobid, lsf_state FROM runs "
+        "WHERE job_key = ? AND status = 'wip'", (job_key,)
     ).fetchall()
     conn.close()
-    for run_id, pid, lsf_jobid in rows:
-        alive = _lsf_alive(lsf_jobid) if lsf_jobid else _pid_alive(pid)
-        if not alive:
-            _finish(run_id, "failed")
+    for run_id, outdir, lsf_jobid, lsf_state in rows:
+        receipt = completion(run_id, _abs(outdir))
+        if receipt is not None:
+            status = "done" if receipt["exit_code"] == 0 else "failed"
+            ended = receipt["ended_at"]
+        elif lsf_jobid and lsf_state is not None:
+            # lsf_state is set when the STAGE's submission ack is recorded; until then the
+            # row holds the driver's job ID, whose completion says nothing about the worker.
+            try:
+                result = subprocess.run(["bjobs", "-o", "stat", "-noheader", lsf_jobid],
+                                        capture_output=True, text=True, timeout=15)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            state = result.stdout.strip()
+            if result.returncode != 0 or state not in ("DONE", "EXIT"):
+                continue
+            status = "done" if state == "DONE" else "failed"
+            ended = _now()  # scheduler confirms outcome, but no exact finish time was retained
+        else:
+            continue
+        _write(lambda conn, rid=run_id, status=status, ended=ended: conn.execute(
+            "UPDATE runs SET status=?, ended_at=? WHERE run_id=? AND status='wip'",
+            (status, ended, rid),
+        ))
+
+
+def completion(run_id: int, outdir: str) -> "dict | None":
+    """Read a validated receipt for THIS attempt, including when --extend reused its dir."""
+    try:
+        data = json.loads((Path(outdir) / f"exit.{run_id}.json").read_text())
+        if not isinstance(data, dict) or data.get("run_id") != run_id:
+            return None
+        if type(data.get("exit_code")) is not int:
+            return None
+        datetime.strptime(data["ended_at"], "%Y-%m-%d-%H-%M-%S")
+        return data
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
 
 
 class RunBusy(RuntimeError):
@@ -429,10 +423,9 @@ def _start(
     behaves like "new" (nothing to clear). ``job_key``/``mode`` fall back to
     ``_job_key_from_env()``/``_mode_from_env()`` when not given explicitly.
 
-    Before any of that, ``reconcile_wip(job_key)`` runs (see its docstring) so a "wip" row left
-    behind by a hard-killed process (SIGKILL etc.) gets corrected to "failed" instead of being
-    assumed dead outright, then ``_assert_not_running(job_key)`` refuses to proceed at all if a
-    "wip" row is confirmed genuinely still alive -- "extend"/"replace" reusing/clearing a
+    Before any of that, ``reconcile_wip(job_key)`` imports known completion outcomes, then
+    ``_assert_not_running(job_key)`` refuses to proceed while any attempt remains unfinished
+    (including unknown outcomes). ``extend``/``replace`` reusing/clearing a
     directory a live process is still writing into, or two concurrent attempts racing each
     other under "new", are both worse than a loud, early failure here. (A dagrunner/aio driver
     normally never trips this: it WAITS per stage for another process's live run to close --
@@ -651,7 +644,7 @@ def decide(job_key: str, inputs: "list[int]", force: "str | None" = None) -> Dec
     """
     if not Path(_db_path()).is_file():
         return Decision("run", "no prior attempt")
-    with _connect(readonly=True) as conn:
+    with closing(_connect(readonly=True)) as conn:
         live = conn.execute("SELECT run_id FROM runs WHERE job_key=? AND status='wip'",
                             (job_key,)).fetchone()
         row = conn.execute("SELECT status, inputs FROM runs WHERE job_key=? "
